@@ -705,6 +705,11 @@ class LakeView:
             # The source's own floor, not this lake's backlog: earlier windows
             # return nothing rather than less, and no backfill reaches past it.
             "earliest_available": spec.earliest_available(date.today()),
+            # Which *kind* of limit produced that floor. Without this the panel
+            # cannot tell a fixed date from a rolling count, and a dataset
+            # limited by a date (trade_ticks) reads as unlimited because its
+            # `history_horizon_days` is null.
+            "history_floor_date": spec.history_floor_date,
             # Whether load() can join adj_factors — the data tab only offers the
             # 复权 control where it means something.
             "adjustable": dataset in ADJUSTABLE_DATASETS,

@@ -202,6 +202,24 @@ def test_detail_reports_the_source_floor_not_the_backlog(client):
     assert daily["earliest_available"] is None
 
 
+def test_detail_distinguishes_a_fixed_floor_from_a_rolling_horizon(client):
+    """A date-limited source must not read as unlimited.
+
+    Both mechanisms produce an `earliest_available`, so that field alone cannot
+    tell them apart. Without `history_floor_date`, the dashboard keyed on
+    `history_horizon_days` and printed 无上限 for trade_ticks — directly
+    contradicting the 最早可得 line beside it.
+    """
+    ticks = client.get("/api/datasets/trade_ticks").json()
+    assert ticks["history_floor_date"] == "2024-01-02"
+    assert ticks["history_horizon_days"] is None
+    assert ticks["earliest_available"] == "2024-01-02"
+
+    # A rolling horizon carries no floor date, and an unlimited source neither.
+    assert client.get("/api/datasets/minute_bars").json()["history_floor_date"] is None
+    assert client.get("/api/datasets/daily_bars").json()["history_floor_date"] is None
+
+
 def test_detail_omits_the_partition_series(client):
     """6,202 partitions must not ride along on every tab switch."""
     assert "partitions_detail" not in client.get("/api/datasets/daily_bars").json()

@@ -154,6 +154,14 @@ class DatasetDetail(Dataset):
     earliest_available: date | None = Field(
         description="Source floor, not this lake's backlog: earlier windows return nothing."
     )
+    history_floor_date: date | None = Field(
+        default=None,
+        description=(
+            "Set when the source's edge is a fixed calendar date rather than the "
+            "rolling trading-day count in history_horizon_days. Both can produce an "
+            "earliest_available, so this is what distinguishes them."
+        ),
+    )
     adjustable: bool = Field(description="load() can join adj_factors for this dataset.")
     primary_key: list[str]
     schema_columns: list[Column] = Field(alias="schema")

@@ -204,6 +204,20 @@ function stateTab(d, prov) {
 
 const fact = (k, v) => `<div class="fact"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
 
+/** How far back the *source* still serves, and by which mechanism.
+ *
+ * Two different limits reach this panel and they must not read the same. A
+ * rolling per-symbol count (minute bars) moves forward every day; a fixed
+ * calendar floor (trade_ticks) does not, and its horizon therefore grows.
+ * Keying only on `history_horizon_days` printed "无上限" for the floor case —
+ * directly contradicting the 最早可得 line right underneath it.
+ */
+function horizonText(d) {
+  if (d.history_floor_date) return `自 ${esc(d.history_floor_date)} 起（固定底，不滚动）`;
+  if (d.history_horizon_days) return `${d.history_horizon_days} 个交易日（滚动）`;
+  return "无上限";
+}
+
 function metaTab(d) {
   const yn = (b) => (b ? "是" : "否");
   const contract = [
@@ -222,7 +236,7 @@ function metaTab(d) {
   ].join("");
   const sources = [
     fact("回填源", d.backfill_source ? esc(d.backfill_source) : "—"),
-    fact("源端历史视野", d.history_horizon_days ? `${d.history_horizon_days} 个交易日` : "无上限"),
+    fact("源端历史视野", horizonText(d)),
     fact("最早可得", d.earliest_available || "不受源端限制"),
   ].join("");
   const ops = [
