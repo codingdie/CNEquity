@@ -46,7 +46,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import polars as pl
+import pyarrow.parquet as pq
 
 from ashare_lake.config import Config
 from ashare_lake.domain.datasets import DATASETS, DatasetSpec
@@ -59,6 +61,10 @@ PARTITION_STATS_FILE = "partition_stats.parquet"
 PROVENANCE_STATS_FILE = "provenance_stats.parquet"
 STATS_SUMMARY_FILE = "stats-latest.json"
 _REBUILD_LOCK = ".rebuild.lock"
+# Above this row count a dataset is considered too large for the historical
+# Polars whole-dataset aggregation path. Large datasets get footer-based
+# partition row counts and a DuckDB column-pruned provenance aggregation.
+LARGE_STATS_ROW_THRESHOLD = 2_000_000
 
 # Column polars fills with the source file of each row. Underscored so it cannot
 # collide with a dataset column.
@@ -167,6 +173,127 @@ def _empty(schema: dict[str, pl.DataType]) -> pl.DataFrame:
     return pl.DataFrame(schema=schema)
 
 
+def _sql_ident(name: str) -> str:
+    """Quote a SQL identifier; all callers pass trusted dataset column names."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _parquet_row_count(path: Path) -> int:
+    """Read one file's row count from its footer, never from its data rows."""
+    try:
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:
+        # A damaged file already fails normal reads. Stats should still be
+        # able to describe the rest of the lake.
+        return 0
+
+
+def _duckdb_provenance(
+    config: Config, files: list[Path], spec: DatasetSpec
+) -> tuple[pl.DataFrame, dict[str | None, int]]:
+    """Column-pruned provenance aggregation for very large datasets.
+
+    The historical Polars path materialises the same columns plus the source
+    file name and can exhaust a normal container on datasets with hundreds of
+    millions of rows. DuckDB can perform the same grouped aggregation while
+    spilling to disk, so the process keeps the dashboard alive instead of
+    becoming a one-off high-memory job.
+    """
+    scratch = stats_root(config) / "tmp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute(f"SET memory_limit='{config.duckdb_memory_limit}'")
+        con.execute(f"SET threads={config.duckdb_threads}")
+        con.execute(
+            f"PRAGMA temp_directory='{scratch.as_posix().replace(chr(39), chr(39) * 2)}'"
+        )
+        paths = [str(path) for path in files]
+        describe = con.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?, union_by_name=true)", [paths]
+        ).fetchall()
+        names = {str(row[0]) for row in describe}
+        keys = [col for col in _PROVENANCE_KEYS if col in names]
+
+        selected = ["filename AS __source_file"]
+        selected += [_sql_ident(key) for key in keys]
+        selected += ["count(*) AS row_count"]
+        if "fetched_at" in names:
+            selected += [
+                "min(fetched_at) AS fetched_at_min",
+                "max(fetched_at) AS fetched_at_max",
+            ]
+
+        grouped = ["__source_file"]
+        grouped += [_sql_ident(key) for key in keys]
+        query = (
+            f"SELECT {', '.join(selected)} "
+            "FROM read_parquet(?, filename=true, union_by_name=true) "
+            f"GROUP BY {', '.join(grouped)}"
+        )
+        per_file = pl.from_arrow(con.execute(query, [paths]).arrow())
+    finally:
+        con.close()
+
+    per_file = per_file.with_columns(
+        pl.col("__source_file")
+        .map_elements(
+            lambda path: _partition_of(path, spec.partition_col),
+            return_dtype=pl.Utf8,
+        )
+        .alias("partition")
+    )
+
+    rows_by_partition = {
+        row["partition"]: int(row["row_count"])
+        for row in per_file.group_by("partition")
+        .agg(pl.col("row_count").sum())
+        .iter_rows(named=True)
+    }
+
+    if not keys:
+        return _empty(PROVENANCE_STATS_SCHEMA), rows_by_partition
+
+    rollup = [pl.col("row_count").sum().alias("row_count")]
+    if "fetched_at_min" in per_file.columns:
+        rollup += [
+            pl.col("fetched_at_min").min().alias("fetched_at_min"),
+            pl.col("fetched_at_max").max().alias("fetched_at_max"),
+        ]
+    provenance = (
+        per_file.group_by(["partition", *keys])
+        .agg(rollup)
+        .with_columns(pl.lit(spec.name, dtype=pl.Utf8).alias("dataset"))
+    )
+    for col, dtype in PROVENANCE_STATS_SCHEMA.items():
+        if col not in provenance.columns:
+            provenance = provenance.with_columns(pl.lit(None, dtype=dtype).alias(col))
+    provenance = provenance.select(list(PROVENANCE_STATS_SCHEMA)).cast(PROVENANCE_STATS_SCHEMA)
+    return provenance, rows_by_partition
+
+
+def _partition_stats_from_footers(
+    spec: DatasetSpec, groups: dict[str | None, list[Path]]
+) -> pl.DataFrame:
+    """Partition measurements from Parquet footers only."""
+    rows = []
+    for value, files in groups.items():
+        part = parse_partition(value) if value is not None else None
+        rows.append(
+            {
+                "dataset": spec.name,
+                "partition": value,
+                "granularity": granularity_of(part) if part else None,
+                "period_start": part.start if part else None,
+                "period_end": part.end if part else None,
+                "row_count": sum(_parquet_row_count(path) for path in files),
+                "file_count": len(files),
+                "bytes": sum(path.stat().st_size for path in files if path.is_file()),
+            }
+        )
+    return pl.DataFrame(rows, schema=PARTITION_STATS_SCHEMA)
+
+
 def _provenance_for_dataset(
     files: list[Path], spec: DatasetSpec
 ) -> tuple[pl.DataFrame, dict[str | None, int]]:
@@ -236,6 +363,13 @@ def _stats_for_dataset(
         return None
 
     all_files = [f for files in groups.values() for f in files]
+    footer_partitions = _partition_stats_from_footers(spec, groups)
+    estimated_rows = int(footer_partitions["row_count"].sum())
+
+    if estimated_rows > LARGE_STATS_ROW_THRESHOLD:
+        provenance, rows_by_partition = _duckdb_provenance(config, all_files, spec)
+        return footer_partitions, provenance
+
     provenance, rows_by_partition = _provenance_for_dataset(all_files, spec)
 
     partition_rows = []

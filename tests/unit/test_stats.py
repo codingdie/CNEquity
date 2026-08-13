@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import polars as pl
 import pytest
 
+from ashare_lake.storage import stats as stats_module
 from ashare_lake.file_lock import exclusive_lock
 from ashare_lake.storage.stats import (
     load_partition_stats,
@@ -76,6 +77,25 @@ def test_row_counts_split_by_source_within_one_partition(config):
     assert provenance["source"].to_list() == ["sina", "tdx_protocol"]
     assert provenance["row_count"].to_list() == [1, 2]
     assert provenance["row_count"].sum() == partitions["row_count"].item()
+
+
+def test_large_dataset_provenance_uses_the_spillable_path(config, monkeypatch):
+    """The DuckDB path must preserve the same rows-by-source contract."""
+    monkeypatch.setattr(stats_module, "LARGE_STATS_ROW_THRESHOLD", 0)
+    root = config.curated_root / "daily_bars"
+    _write(
+        root,
+        "trade_date=2026-07-31",
+        [_bar("600519.SH"), _bar("000001.SZ"), _bar("000002.SZ", source="sina")],
+    )
+
+    rebuild_stats(config, datasets=["daily_bars"])
+    partitions = load_partition_stats(config)
+    provenance = load_provenance_stats(config).sort("source")
+
+    assert partitions["row_count"].item() == 3
+    assert provenance["source"].to_list() == ["sina", "tdx_protocol"]
+    assert provenance["row_count"].to_list() == [1, 2]
 
 
 @pytest.mark.parametrize(
