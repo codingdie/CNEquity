@@ -107,6 +107,10 @@ def _run_rotation_step(
 @register_step("hot_rank", group="research", depends_on=["instruments"])
 def step_hot_rank(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     def _fetch(d: date, *, config: Config, run_id: str):
+        # EastMoney can truncate the live hot-rank page (e.g. 99 of 500 unique
+        # A-shares). A non-empty partial snapshot is still useful to the
+        # research group and must not hard-fail the whole run; empty results
+        # continue to fail via run_incremental_fetched.
         return call_with_run_id(
             fetch_hot_rank,
             d,
@@ -114,7 +118,7 @@ def step_hot_rank(config: Config, trade_date: date, run_id: str, context: dict) 
             dataset="hot_rank",
             run_id=run_id,
             config=config,
-            require_top_n=True,
+            require_top_n=False,
         )
 
     # The vendor endpoint is a live snapshot and can legally return its last
