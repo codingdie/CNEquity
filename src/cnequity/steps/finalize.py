@@ -701,7 +701,7 @@ def step_derive_industry_index(
         derived_revisions.ensure_current("industry_index")
         derived_revisions.materialize_current("industry_index")
         before_files = _layer_file_identity(config.derived_root / "industry_index")
-        summary = derive_industry_index(config)
+        summary = derive_industry_index(config, end=trade_date, full=True)
         published_revision = _publish_derived_revision(
             config,
             "industry_index",

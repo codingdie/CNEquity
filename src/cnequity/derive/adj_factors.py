@@ -50,6 +50,11 @@ CROSSCHECK_PRIOR_LOOKBACK_DAYS = 35
 # daily_bars`, which would otherwise realign the whole market in one go.
 UNCOVERED_REFRESH_LIMIT = 500
 
+# A daily-bars gap-fill can insert rows into a partition behind the derived
+# watermark (for example a 2026-08-19 row landed after the 2026-08-20 derive).
+# Reconcile a short recent window each run so those late rows do not stay at
+# factor=1.0 with adj_is_exact=false indefinitely.
+RECENT_FACTOR_RECONCILE_DAYS = 3
 _EMPTY_BAR_DATES = pl.DataFrame(schema={"symbol": pl.Utf8, "trade_date": pl.Date})
 _ADJ_PK = ["symbol", "trade_date", "adjust_type"]
 _RETRY_STATE_FIELD = "retry_symbols"
@@ -217,12 +222,21 @@ def _bars_for_derive(
     )
     if not incremental.is_empty():
         frames.append(incremental)
-    # The watermark records only the latest partition date, not whether that
-    # partition covers every bar. A retry or late compaction can add symbols to
-    # daily_bars on the watermark date after the first derive has completed.
-    missing = _bars_missing_factor_partition(config, watermark)
-    if not missing.is_empty():
-        frames.append(missing)
+    # An existing watermark partition can be incomplete: daily_bars may have
+    # landed more rows after an earlier derive finished (retry, gap-fill, manual
+    # compact). The watermark is a date, not a coverage receipt, so compare the
+    # latest factor partition against the bars it should cover instead of
+    # treating it as complete. Also look back over recent sessions: a late
+    # gap-fill row can land in an older partition after the watermark already
+    # advanced past it.
+    if watermark is not None:
+        missing = _bars_missing_factor_partitions(
+            config,
+            watermark,
+            lookback_days=RECENT_FACTOR_RECONCILE_DAYS,
+        )
+        if not missing.is_empty():
+            frames.append(missing)
     # Ex-date / new-listing / explicit rebackfill: realign full history for those symbols.
     if refresh_set:
         refreshed = _load_daily_bar_dates(config, symbols=sorted(refresh_set))
@@ -237,11 +251,20 @@ def _bars_for_derive(
     )
 
 
-def _bars_missing_factor_partition(config: Config, watermark: date) -> pl.DataFrame:
-    """Bars on the watermark date missing from its factor partition."""
+def _bars_missing_factor_partitions(
+    config: Config,
+    watermark: date,
+    *,
+    lookback_days: int,
+) -> pl.DataFrame:
+    """Bars in a recent window that the factor partitions have no row for."""
+    # Lazy import: query.reader imports STORED_ADJUST_TYPE from this module.
     from cnequity.query.parquet_scan import dataset_has_parquet
 
-    bars = _load_daily_bar_dates(config, start=watermark).filter(pl.col("trade_date") == watermark)
+    start = watermark - timedelta(days=max(0, lookback_days - 1))
+    bars = _load_daily_bar_dates(config, start=start).filter(
+        pl.col("trade_date") <= watermark
+    )
     if bars.is_empty():
         return bars
 
@@ -251,15 +274,29 @@ def _bars_missing_factor_partition(config: Config, watermark: date) -> pl.DataFr
         if bars.is_empty():
             return bars
 
-    part = config.derived_root / "adj_factors" / f"trade_date={watermark.isoformat()}"
-    if not dataset_has_parquet(part):
-        return bars
+    factor_frames: list[pl.DataFrame] = []
+    for trade_date in bars["trade_date"].unique().sort().to_list():
+        part = (
+            config.derived_root
+            / "adj_factors"
+            / f"trade_date={trade_date.isoformat()}"
+        )
+        if not dataset_has_parquet(part):
+            continue
+        factors = _read_parquet_files(sorted(part.rglob("*.parquet")))
+        if factors.is_empty() or not {"symbol", "trade_date"}.issubset(factors.columns):
+            continue
+        factor_frames.append(factors.select(["symbol", "trade_date"]).unique())
 
-    factors = pl.concat(
-        [pl.read_parquet(path).select("symbol") for path in sorted(part.rglob("*.parquet"))],
-        how="diagonal_relaxed",
-    ).unique()
-    return bars.join(factors, on="symbol", how="anti")
+    if not factor_frames:
+        return bars
+    factors = pl.concat(factor_frames, how="diagonal_relaxed")
+    return bars.join(factors, on=["symbol", "trade_date"], how="anti")
+
+
+def _bars_missing_factor_partition(config: Config, watermark: date) -> pl.DataFrame:
+    """Backward-compatible single-partition wrapper for direct callers/tests."""
+    return _bars_missing_factor_partitions(config, watermark, lookback_days=0)
 
 
 def _align_factors_to_bars(
