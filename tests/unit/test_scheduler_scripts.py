@@ -58,6 +58,9 @@ def _stub_cne(tmp_path: Path) -> Path:
 printf 'argc=%s\\n' "$#" >> "$CNE_CALL_LOG"
 for arg in "$@"; do printf '<%s>\\n' "$arg" >> "$CNE_CALL_LOG"; done
 sleep "${CNE_STUB_SLEEP:-0}"
+if [ "$1" = "stats" ]; then
+  exit "${CNE_STUB_STATS_STATUS:-${CNE_STUB_STATUS:-0}}"
+fi
 exit "${CNE_STUB_STATUS:-0}"
 """,
         encoding="utf-8",
@@ -177,6 +180,32 @@ def test_stale_pipeline_forwards_target_date_and_returns_cne_failure(tmp_path):
         "2026-08-28",
     ]
     assert "FAILED" in result.stdout
+
+
+def test_stale_pipeline_refreshes_stats_without_failing_completed_repair(tmp_path):
+    cne = _stub_cne(tmp_path)
+    calls = tmp_path / "calls"
+    env = _stale_env(tmp_path, cne, calls)
+    env["CNE_STUB_STATS_STATUS"] = "9"
+
+    result = _run(STALE, "2026-08-28", env=env)
+
+    assert result.returncode == 0
+    assert _call_args(calls) == [
+        "run",
+        "daily",
+        "--stale-only",
+        "--config",
+        str(tmp_path / "cnequity.toml"),
+        "--trade-date",
+        "2026-08-28",
+        "stats",
+        "rebuild",
+        "--if-stale",
+        "--config",
+        str(tmp_path / "cnequity.toml"),
+    ]
+    assert "stats rebuild FAILED (non-fatal)" in result.stdout
 
 
 def test_daily_and_stale_wrappers_share_an_atomic_nonblocking_lock(tmp_path):

@@ -50,6 +50,13 @@ log "--- stale-only repair ---"
 if "$CNE" run daily --stale-only --config "$CONFIG" \
   ${DATE_ARGS[@]+"${DATE_ARGS[@]}"} >>"$LOG" 2>&1; then
   log "stale-only repair OK"
+  # The normal pipeline has already built stats before this independent late
+  # pass.  A successful repair creates a later run id, so the timer-safe form
+  # refreshes the dashboard only when that repair actually moved the lake.
+  log "--- stats rebuild ---"
+  if ! "$CNE" stats rebuild --if-stale --config "$CONFIG" >>"$LOG" 2>&1; then
+    log "stats rebuild FAILED (non-fatal)"
+  fi
   log "==== stale pipeline DONE ok ===="
   exit 0
 else

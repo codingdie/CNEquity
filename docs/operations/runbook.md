@@ -240,18 +240,19 @@ cne snapshot restore research-20260828 /new/empty/cnequity-restore
 
 ## 收尾补抓
 
-**`daily_pipeline.sh` 已经内建了这一步**，不用额外配 cron。跑完全部组之后它会：
+生产默认由独立的 **`stale_pipeline.sh`** 执行收尾补抓。`install_scheduler.sh` 会安装 `com.cnequity.stale`，在主机本地时间 20:05 运行；它和主日更共用锁，因此不会和仍在执行的分组、健康检查或备份重叠。
 
-1. 用 `cne status --datasets` 探一下（有 STALE 退出 1）——干净的日子到此为止，零成本
-2. 有 STALE 才等 `CNE_STALE_RETRY_DELAY_SEC`（默认 1800 秒）
-3. 然后 `cne run daily --stale-only`，只重抓仍然落后的
+1. 执行 `cne run daily --stale-only`，只重抓仍然落后的数据集；没有 STALE 时不建 run、直接退出 0
+2. 命令成功后执行 `cne stats rebuild --if-stale`，仅在该次补抓产生新的 ingestion run 时重建前端统计
 
-排在健康检查**之前**，所以补抓成功就不会误报。
+主日更的 `CNE_STALE_RETRY` 默认值是 `0`；设为 `1` 才恢复旧的进程内延迟补抓兼容路径。常规调度不应打开它，因为单次源端故障不应让主流水线等待半小时。
+
+主日更在所有分组完成后会无条件执行一次 `cne stats rebuild`；独立补抓使用 `--if-stale` 形式补齐它随后写入的数据。两者的统计失败都只记日志，不会让已完成的 ingestion 回滚或改判失败。
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
-| `CNE_STALE_RETRY` | `1` | 设 `0` 关闭 |
-| `CNE_STALE_RETRY_DELAY_SEC` | `1800` | 补抓前等多久 |
+| `CNE_STALE_RETRY` | `0` | 兼容开关；设 `1` 才在主进程内延迟补抓 |
+| `CNE_STALE_RETRY_DELAY_SEC` | `1800` | 兼容路径补抓前等多久 |
 | `CNE_SOURCE_HEALTH` | `1` | 每日日更后串行探测并积累源 SLO；设 `0` 关闭 |
 | `CNE_SOURCE_VANTAGE` | `local` | 当前出口的稳定标签；不要把海外样本标成 `cn` |
 
@@ -259,19 +260,19 @@ cne snapshot restore research-20260828 /new/empty/cnequity-restore
 
 这不是重试不够：`clist.py` 的 per-host 重试加退避一直都在，`valuation_metrics` 在 2026-07-30 / 07-31 是把所有 host 的重试都耗尽了。缺的是**当天的第二个窗口**。
 
-**等待本身就是重点。** 立刻重试大概率撞上同一场中断，所以先睡再抓——但只在真有 STALE 时睡。
+**第二个窗口本身就是重点。** 立刻重试大概率撞上同一场中断，所以默认把补抓移到晚间独立调度；主日更可以及时结束并报告，而晚间仍有一次当天的修复机会。
 
-更糟的是它很安静：默认 `CNE_SOFT_FAIL_OK=1`，gate 正常时 soft 组失败只告警、退出 0。上面那两天就是这样过了三天没人发现。补抓失败同样算 soft，会出现在分组汇总的 `stale-retry:` 一行里。
+更糟的是它很安静：默认 `CNE_SOFT_FAIL_OK=1`，gate 正常时 soft 组失败只告警、退出 0。上面那两天就是这样过了三天没人发现。独立补抓失败会保留非零退出码和单独日志，供调度器与运维检查发现。
 
 ### 中断持续几小时怎么办
 
-脚本内的等待是分钟级的。源端挂半天的话，再加一行独立 cron：
+macOS 用安装器生成的 `com.cnequity.stale` 即可。Linux/cron 环境请为同一晚间窗口配置：
 
 ```cron
-5 20 * * 1-5 cd /path/to/cnequity && cne run daily --stale-only --config configs/cnequity.toml
+5 20 * * 1-5 cd /path/to/cnequity && scripts/stale_pipeline.sh
 ```
 
-`--stale-only` 没有落后的数据集时不建 run、直接退出 0，重复挂无害。
+`--stale-only` 没有落后的数据集时不建 run、直接退出 0，重复调度无害。
 
 配套的可见性：
 

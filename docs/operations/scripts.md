@@ -21,9 +21,7 @@
 for group in core capital signals fundamentals macro_risk research; do
   cne run daily --group $group
 done
-cne status --datasets            # 探针：有 STALE 才继续
-  └─ sleep CNE_STALE_RETRY_DELAY_SEC
-     cne run daily --stale-only  # 只重抓仍落后的
+cne stats rebuild                # 重建前端日期/分区清单
 health_notify.sh
 cne sources probe --vantage $CNE_SOURCE_VANTAGE
 cne sources slo                    # 累积报告，日更不 enforce
@@ -32,20 +30,30 @@ backup_meta.sh
 cne clean
 ```
 
-**收尾补抓**排在健康检查之前，所以补抓成功不会误报。`snapshot` 数据集只抓 run 当天，源端在那一个窗口中断就永久丢那天（重放会伪造行）——而立刻重试大概率撞上同一场中断，所以先等再抓，**但只在真有 STALE 时才等**，干净的日子零成本。详见 [runbook · 收尾补抓](runbook.md#收尾补抓)。
+**stats 重建**在全部分组完成后、健康检查之前无条件执行。它让前端的日期/分区列表直接反映本日写入；全量形式刻意不依赖 run-id 新鲜度，避免有并行写入时漏掉较晚落盘的分区。统计缓存失败只记录 non-fatal，不改变日更结果。
+
+**收尾补抓**由独立的 `stale_pipeline.sh` 在晚间窗口执行，与主日更共享锁而不会重叠。补抓命令成功后，它以 `cne stats rebuild --if-stale` 更新统计：没有新的 ingestion run 时是无操作，有修复时才重建。详见 [runbook · 收尾补抓](runbook.md#收尾补抓)。
 
 **环境变量**（仅本脚本读取；`cne` CLI 不读）：`CNE_CONFIG`, `CNE_LOG_DIR`, `CNE_GROUPS`,
 `CNE_GATE_GROUPS`（默认 `core`，失败标为 gate；其余组标 soft）、
 `CNE_SOFT_FAIL_OK`（默认 `1`：gate OK 时 soft 失败 exit 0；`0`=仍 exit 1）、
-`CNE_STALE_RETRY`（默认 `1`；`0` 关闭收尾补抓）、
-`CNE_STALE_RETRY_DELAY_SEC`（默认 `1800`）、
+`CNE_STALE_RETRY`（默认 `0`；兼容开关，设 `1` 才在主进程中等待并补抓）、
+`CNE_STALE_RETRY_DELAY_SEC`（默认 `1800`；仅兼容补抓前等待）、
 `CNE_SOURCE_HEALTH`（默认 `1`；`0` 关闭每日源探测）、
 `CNE_SOURCE_VANTAGE`（默认 `local`；应设为稳定且真实的出口标签，如 `cn` 或
 `overseas`）、
 `CNE_TRADE_DATE`、
 `CNE_BIN`（覆盖 `cne` 路径；供用 stub 跑通控制流的测试用）。
 
-结束时打印分组摘要（`group: OK|FAILED [gate|soft]`）外加 `stale-retry: OK|FAILED|not needed|skipped`，便于区分「门禁挂了」与「东财挂了」。补抓失败算 soft。
+结束时打印分组摘要（`group: OK|FAILED [gate|soft]`）外加兼容路径的 `stale-retry: OK|FAILED|not needed|skipped`，便于区分「门禁挂了」与「东财挂了」。
+
+---
+
+### stale_pipeline.sh
+
+**用途**：在主日更之后的独立晚间窗口执行 `cne run daily --stale-only`，修复当日一度不可用的 `snapshot` 数据集。它与 `daily_pipeline.sh` 共用 `daily` shell 锁，运行重叠时直接跳过而不排队。
+
+补抓成功后会执行 `cne stats rebuild --if-stale`，使前端统计覆盖该次修复；统计重建失败只写日志，不会把已成功的补抓改判为失败。
 
 ---
 
