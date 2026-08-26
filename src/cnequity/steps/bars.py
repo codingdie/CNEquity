@@ -966,6 +966,21 @@ def _finish_daily_bars(
             findings.extend(kline.get("audit_findings") or [])
             explicit_no_data.update(kline.get("expected_no_data_symbols") or [])
             source_empty_symbols.update(kline.get("expected_no_data_symbols") or [])
+
+        # EastMoney clist may also omit low-liquidity/odd symbols on a tip
+        # day. Try Sina for the still-missing keys before giving up, so a
+        # TDX miss does not leave the whole market snapshot staged.
+        still_missing = sorted(expected_symbols - _staged_daily_bar_symbols(config, run_id, end))
+        if still_missing:
+            tip_sina = _gapfill_tip_via_sina(
+                config,
+                run_id,
+                end,
+                expected_symbols=expected_tdx_symbols,
+            )
+            rows_read += int(tip_sina.get("rows_read", 0))
+            rows_written += int(tip_sina.get("rows_written", 0))
+            findings.extend(tip_sina.get("audit_findings") or [])
     elif failed_symbols or expected_tdx_symbols or expected_fallback_symbols:
         all_expected_symbols = list(
             dict.fromkeys((expected_tdx_symbols or []) + (expected_fallback_symbols or []))
@@ -1378,6 +1393,69 @@ def _staged_daily_bar_missing_keys(
     # gate and must not turn a whole-symbol empty response into a duplicate
     # error path.
     return {key for key in missing if key[0] in observed_symbols}
+
+
+def _gapfill_tip_via_sina(
+    config: Config,
+    run_id: str,
+    trade_date: date,
+    *,
+    expected_symbols: list[str],
+) -> dict:
+    """Best-effort Sina gap-fill for tip keys EastMoney clist also missed.
+
+    TDX is the primary daily bar source; EastMoney clist is the first fallback.
+    Very low-liquidity funds can be missing from both on a given session even
+    though Sina still serves a bar. This is a narrow, best-effort repair: only
+    symbols still unstaged are fetched, and failures are surfaced as findings
+    rather than raising the whole run.
+    """
+    if not expected_symbols:
+        return {"rows_read": 0, "rows_written": 0, "filled": False, "complete": False}
+    staged = _staged_daily_bar_symbols(config, run_id, trade_date)
+    missing = [s for s in expected_symbols if s not in staged]
+    if not missing:
+        return {"rows_read": 0, "rows_written": 0, "filled": False, "complete": True}
+    if not config.sources.get("sina", True):
+        return {
+            "rows_read": 0,
+            "rows_written": 0,
+            "filled": False,
+            "complete": False,
+            "audit_findings": [
+                {
+                    "dataset": "daily_bars",
+                    "severity": "warning",
+                    "check": "daily_bars_sina_gapfill",
+                    "message": (
+                        f"{len(missing)} tip key(s) still missing after EastMoney "
+                        "clist but sina fallback is disabled"
+                    ),
+                }
+            ],
+        }
+    result = fetch_bars_via_sina(
+        config,
+        missing,
+        trade_date,
+        trade_date,
+        run_id,
+        batch_prefix="sina-tip-gapfill",
+    )
+    filled = int(result.get("rows_written", 0))
+    failed_names = result.get("failed_symbol_names") or []
+    findings = (result.get("context_updates") or {}).get("audit_findings") or []
+    resolved = sorted(set(missing) - set(failed_names))
+    complete = filled > 0 and not failed_names
+    if complete:
+        _resolve_recovered_daily_batches(config, run_id, resolved_symbols=set(resolved))
+    return {
+        "rows_read": filled,
+        "rows_written": filled,
+        "filled": filled > 0,
+        "complete": complete,
+        "audit_findings": findings,
+    }
 
 
 def _gapfill_tip_via_clist(
