@@ -507,6 +507,8 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
             result["context_updates"] = {"audit_findings": _findings}
         return result
     findings = list(_findings)
+    df, calibration_findings = _calibrate_st_with_exchange(df, config, trade_date)
+    findings.extend(calibration_findings)
     if fallback_days:
         findings.append(
             {
@@ -534,6 +536,103 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
     if findings:
         result["context_updates"] = {"audit_findings": findings}
     return result
+
+
+def _active_all_a_symbols(config: Config, trade_date: date) -> set[str] | None:
+    """Symbols still listed on *trade_date*, from the instrument catalogue.
+
+    Returns ``None`` when the catalogue cannot tell (missing dataset or no
+    usable columns); callers then treat every symbol as active. The catalogue
+    keeps delisted names and their last exchange short name — those names must
+    not be treated as current ST designations.
+    """
+    from cnequity.steps.common import instrument_metadata
+
+    meta = instrument_metadata(config)
+    if meta.is_empty() or "symbol" not in meta.columns:
+        return None
+    active = meta
+    if "list_date" in active.columns:
+        active = active.filter(
+            pl.col("list_date").is_null() | (pl.col("list_date") <= pl.lit(trade_date))
+        )
+    if "delist_date" in active.columns:
+        active = active.filter(
+            pl.col("delist_date").is_null() | (pl.col("delist_date") >= pl.lit(trade_date))
+        )
+    return set(active.get_column("symbol").drop_nulls().to_list())
+
+
+def _calibrate_st_with_exchange(
+    frame: pl.DataFrame,
+    config: Config,
+    trade_date: date,
+) -> tuple[pl.DataFrame, list[dict]]:
+    """One-way ST calibration from the exchanges' own short names.
+
+    EastMoney's risk-warning board is a push2 clist filter that occasionally
+    lags the exchange: measured 2026-08-27, two suspended ST names (000016.SZ,
+    600491.SH) were absent from the board and landed as plain ``suspended``.
+    The exchange downloads are the authoritative current designation, so they
+    may only **add** ``st`` labels, never remove one. A suspended ST keeps
+    ``is_trading=false`` so the row still means untradable while carrying the
+    ST label that market-breadth and universe filters rely on.
+
+    Symbols already delisted on *trade_date* are left untouched: the exchange
+    carries a company until formal delisting, while the lake already records
+    its end date, so relabelling would resurrect a status that no longer
+    trades. When the exchange feed is unavailable the snapshot is written as
+    fetched and a warning finding records the skipped calibration.
+    """
+    if not config.sources.get("exchange", False):
+        return frame, []
+
+    from cnequity.adapters.exchange.st_lists import (
+        fetch_exchange_names_with_status,
+        is_st_name,
+    )
+
+    exchange_result = fetch_exchange_names_with_status(config=config)
+    if exchange_result.failures or not exchange_result.names:
+        failures = exchange_result.failures
+        detail = f" ({', '.join(failures)})" if failures else ""
+        return frame, [
+            {
+                "dataset": "trading_status",
+                "severity": "warning",
+                "check": "trading_status_exchange_st_unavailable",
+                "message": (
+                    "Exchange ST calibration skipped: exchange listings unavailable"
+                    f"{detail}; kept the EastMoney snapshot unchanged"
+                ),
+            }
+        ]
+
+    names = exchange_result.names
+    designated = {sym for sym, name in names.items() if is_st_name(name)}
+    active = _active_all_a_symbols(config, trade_date)
+    if active is not None:
+        designated &= active
+    designated &= set(frame.get_column("symbol").drop_nulls().to_list())
+    if not designated:
+        return frame, []
+
+    needs_label = frame.filter(
+        pl.col("symbol").is_in(designated)
+        & ~pl.col("status").str.to_lowercase().is_in(["st", "*st"])
+    )
+    if needs_label.is_empty():
+        return frame, []
+    calibrated = frame.with_columns(
+        pl.when(
+            pl.col("symbol").is_in(designated)
+            & ~pl.col("status").str.to_lowercase().is_in(["st", "*st"])
+        )
+        .then(pl.lit("st"))
+        .otherwise(pl.col("status"))
+        .alias("status")
+    )
+    return calibrated, []
 
 
 def _is_all_a(symbol: str) -> bool:

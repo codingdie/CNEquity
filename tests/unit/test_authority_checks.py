@@ -54,6 +54,34 @@ def _lake(tmp_path, *, pmi: float | None = None, status: dict[str, str] | None =
     return cfg
 
 
+def _lake_with_instruments(
+    tmp_path,
+    *,
+    status: dict[str, str],
+    delisted: set[str] | None = None,
+) -> Config:
+    """Variant of ``_lake`` that also writes an instruments catalogue."""
+    cfg = _lake(tmp_path, status=status)
+    part = cfg.curated_root / "instruments"
+    part.mkdir(parents=True, exist_ok=True)
+    symbols = list(status)
+    delisted = delisted or set()
+    pl.DataFrame(
+        {
+            "symbol": symbols,
+            "name": [f"公司{i}" for i in range(len(symbols))],
+            "exchange": [s[-2:] for s in symbols],
+            "asset_type": ["stock"] * len(symbols),
+            "list_date": [date(2000, 1, 1)] * len(symbols),
+            "delist_date": [date(2025, 1, 1) if symbol in delisted else None for symbol in symbols],
+            "source": ["tdx_protocol"] * len(symbols),
+            "data_version": ["v1"] * len(symbols),
+            "fetched_at": [datetime.now(timezone.utc)] * len(symbols),
+        }
+    ).write_parquet(part / "p.parquet")
+    return cfg
+
+
 # --- PMI vs NBS --------------------------------------------------------------
 
 
@@ -204,6 +232,22 @@ def test_names_the_lake_does_not_carry_are_not_a_shortfall(monkeypatch, tmp_path
     _exchange(monkeypatch, names)
     status = {s: "normal" for s in syms}
     assert ac.st_labels_vs_exchange(_lake(tmp_path, status=status), TD) == []
+
+
+def test_delisted_st_names_are_not_a_shortfall(monkeypatch, tmp_path):
+    """The exchange keeps a ST name until formal delisting; the lake records the end date.
+
+    The shared-universe comparison must not count a symbol the lake already
+    marks delisted, or the disagreement is permanent (2026-08-27: 600355.SH,
+    603388.SH).
+    """
+    syms, names = _universe(20, st_designated=5)
+    # Two of the ST names are already formally delisted in the catalogue.
+    delisted = set(syms[:2])
+    _exchange(monkeypatch, names)
+    status = {s: "normal" for s in syms}
+    cfg = _lake_with_instruments(tmp_path, status=status, delisted=delisted)
+    assert ac.st_labels_vs_exchange(cfg, TD) == []
 
 
 def test_small_disagreement_is_tolerated_as_naming_lag(monkeypatch, tmp_path):

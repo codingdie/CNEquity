@@ -207,11 +207,15 @@ def _st_labels_vs_exchange_outcome(config: Config, trade_date: date) -> Authorit
     if not names:
         return AuthorityCheckOutcome("unavailable", [])
 
-    # Both directions are judged only on symbols both sides carry. Restricting
-    # one side is not enough: SSE designates two names as ST that no quote feed
-    # still lists, which would otherwise register as a permanent shortfall and
-    # burn most of the tolerance before any real disagreement appeared.
-    shared = set(names) & covered
+    # Both directions are judged only on symbols both sides carry and that
+    # were still listed on the observation date. Restricting one side is not
+    # enough: SSE carries a company until formal delisting, so it keeps ST
+    # names that no quote feed still lists (e.g. 600355.SH, 603388.SH) and
+    # that the lake already records as delisted. Counting either would be a
+    # permanent shortfall and burn the tolerance before any real
+    # disagreement appeared.
+    active = _active_symbols_on(config, trade_date)
+    shared = (set(names) & covered) if active is None else (set(names) & covered & active)
     by_exchange = {sym for sym in shared if is_st_name(names[sym])}
     labeled_shared = labeled & shared
 
@@ -241,6 +245,29 @@ def _st_labels_vs_exchange_outcome(config: Config, trade_date: date) -> Authorit
             }
         ],
     )
+
+
+def _active_symbols_on(config: Config, trade_date: date) -> set[str] | None:
+    """Symbols still listed on *trade_date* per the instrument catalogue.
+
+    ``None`` when the catalogue cannot tell; callers then fall back to the
+    shared-universe comparison.
+    """
+    from cnequity.steps.common import instrument_metadata
+
+    meta = instrument_metadata(config)
+    if meta.is_empty() or "symbol" not in meta.columns:
+        return None
+    active = meta
+    if "list_date" in active.columns:
+        active = active.filter(
+            pl.col("list_date").is_null() | (pl.col("list_date") <= pl.lit(trade_date))
+        )
+    if "delist_date" in active.columns:
+        active = active.filter(
+            pl.col("delist_date").is_null() | (pl.col("delist_date") >= pl.lit(trade_date))
+        )
+    return set(active.get_column("symbol").drop_nulls().to_list())
 
 
 def st_labels_vs_exchange(config: Config, trade_date: date) -> list[dict]:
