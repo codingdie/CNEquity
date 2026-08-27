@@ -13,7 +13,7 @@ import polars as pl
 from cnequity.config import Config
 from cnequity.domain.datasets import DATASETS
 from cnequity.domain.schemas import data_version_for, with_provenance
-from cnequity.steps.common import fetch_incremental_daily, write_simple
+from cnequity.steps.common import fetch_incremental_daily, incremental_trade_dates, write_simple
 from cnequity.storage.raw_archive import (
     RawArchiveError,
     RawPayloadArchive,
@@ -446,6 +446,7 @@ def _archive_fetched_payload(
     )
 
 
+
 def write_fetched(
     config: Config,
     run_id: str,
@@ -555,6 +556,17 @@ def run_incremental_fetched(
                     df=df,
                 )
             _mark_snapshot_capture(config, dataset, trade_date)
+        spec = DATASETS.get(dataset)
+        if spec is not None and spec.allow_empty_watermark:
+            # The adapter walked the full window and found no rows; treat every
+            # requested trading day as a confirmed absence, not a fetch gap.
+            confirmed_days = incremental_trade_dates(config, dataset, trade_date)
+            if confirmed_days:
+                state = StateStore(config.meta_root)
+                state.add_date_set_members(dataset, "confirmed_empty_dates", confirmed_days)
+                state.update_max_date(dataset, max(confirmed_days))
+                out["confirmed_empty_dates"] = [d.isoformat() for d in confirmed_days]
+
         if findings:
             out["context_updates"] = {"audit_findings": findings}
             # A session-dense dataset is only complete when every requested

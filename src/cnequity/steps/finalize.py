@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -280,6 +280,19 @@ def _reconcile_watermarks(config: Config) -> list[dict]:
             continue
         if max_dt is None or current <= max_dt:
             continue
+        # For event-style datasets with allow_empty_watermark, the lake may
+        # legitimately hold a watermark ahead of the last parquet row because
+        # the source confirmed those days are empty. Only pull back when a
+        # claimed trading day is not a confirmed-empty day.
+        from cnequity.domain.datasets import DATASETS
+        from cnequity.steps.common import list_trading_dates
+
+        spec = DATASETS.get(dataset)
+        if spec is not None and spec.allow_empty_watermark:
+            confirmed = state.get_date_set(dataset, "confirmed_empty_dates")
+            gap_trading_days = list_trading_dates(config, max_dt + timedelta(days=1), current)
+            if gap_trading_days and all(d in confirmed for d in gap_trading_days):
+                continue
         claimed = current
         state.set_date(dataset, max_dt)
         check = (

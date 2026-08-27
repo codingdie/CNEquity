@@ -388,6 +388,11 @@ class DatasetSpec:
     # in its covered span. `fetch_semantics="by_date"` only describes how the
     # source is queried; event and announcement feeds are still sparse.
     coverage_mode: Literal["sparse", "session_dense"] = "sparse"
+    # For event-style datasets where an empty fetch is a *confirmed* absence
+    # (the adapter walked the whole source window and found no matching rows),
+    # an empty result may advance the watermark. The confirmed-empty dates are
+    # recorded in state so compact/reconcile do not pull the watermark back.
+    allow_empty_watermark: bool = False
 
     # ------------------------------------------------------------------
     # Public data-contract metadata.
@@ -1056,6 +1061,9 @@ _SPECS = [
         partition_col="event_date",
         partition_granularity="year",
         reconciliation_lookback_days=30,
+        # CNINFO walks the full window; an empty result means "no matching
+        # regulatory event published that day", not a fetch failure.
+        allow_empty_watermark=True,
     ),
     # derived — ``layer`` is where the parquet lives, ``tier`` what the data is
     # for, so these carry the tier of the question they answer, not "derived".

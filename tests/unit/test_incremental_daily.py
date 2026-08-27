@@ -640,3 +640,37 @@ def test_step_fund_flow_single_day_when_caught_up(tmp_path, monkeypatch):
     assert fetched == [date(2024, 6, 28)]
     assert result["rows_written"] == 1
     assert "context_updates" not in result
+
+
+def test_run_incremental_fetched_empty_advances_watermark_for_event_dataset(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    _seed_trading_calendar(cfg, date(2024, 6, 24), date(2024, 6, 28))
+    state = StateStore(cfg.meta_root)
+    state.set_date("regulatory_events", date(2024, 6, 25))
+
+    def _fetch(day: date) -> pl.DataFrame:
+        return pl.DataFrame()
+
+    result = http_common.run_incremental_fetched(
+        cfg,
+        date(2024, 6, 28),
+        "run-empty-event",
+        "regulatory_events",
+        _fetch,
+        source="cninfo",
+        allow_empty=True,
+    )
+
+    assert result["rows_read"] == 0
+    assert result["rows_written"] == 0
+    assert result["confirmed_empty_dates"] == [
+        "2024-06-26",
+        "2024-06-27",
+        "2024-06-28",
+    ]
+    assert state.get_date("regulatory_events") == date(2024, 6, 28)
+    assert state.get_date_set("regulatory_events", "confirmed_empty_dates") == {
+        date(2024, 6, 26),
+        date(2024, 6, 27),
+        date(2024, 6, 28),
+    }

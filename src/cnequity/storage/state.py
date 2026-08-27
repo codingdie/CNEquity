@@ -333,3 +333,60 @@ def _parse_utc(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(timezone.utc)
+
+    def get_date_set(self, dataset: str, field: str) -> set[date]:
+        """Read a set-like string field containing ISO dates."""
+        values = self.get_string_set(dataset, field)
+        out: set[date] = set()
+        for v in values:
+            try:
+                out.add(date.fromisoformat(v))
+            except ValueError:
+                raise ValueError(f"state field {dataset}.{field} contains non-date {v!r}")
+        return out
+
+    def add_date_set_members(self, dataset: str, field: str, values: Iterable[date]) -> None:
+        """Add date values to a set-like string field (e.g. confirmed-empty days)."""
+        dates = [d.isoformat() for d in values]
+        path = self._path(dataset)
+        with self._dataset_lock(dataset):
+            payload = self._read_payload(path)
+            existing = payload.get(field, [])
+            if not isinstance(existing, list):
+                raise ValueError(f"state field {dataset}.{field} must be a list of strings")
+            merged = sorted(set(existing) | set(dates))
+            if merged:
+                payload[field] = merged
+            else:
+                payload.pop(field, None)
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._write_payload(path, payload)
+
+    def get_date_set(self, dataset: str, field: str) -> set[date]:
+        """Read a set-like string field containing ISO dates."""
+        values = self.get_string_set(dataset, field)
+        out: set[date] = set()
+        for v in values:
+            try:
+                out.add(date.fromisoformat(v))
+            except ValueError:
+                raise ValueError(f"state field {dataset}.{field} contains non-date {v!r}")
+        return out
+
+    def add_date_set_members(self, dataset: str, field: str, values: Iterable[date]) -> None:
+        """Add date values to a set-like string field (e.g. confirmed-empty days)."""
+        dates = [d.isoformat() for d in values]
+        path = self._path(dataset)
+        with self._dataset_lock(dataset):
+            payload = self._read_payload(path)
+            existing = payload.get(field, [])
+            if not isinstance(existing, list):
+                raise ValueError(f"state field {dataset}.{field} must be a list of strings")
+            merged = sorted(set(existing) | set(dates))
+            if merged:
+                payload[field] = merged
+            else:
+                payload.pop(field, None)
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._write_payload(path, payload)
+
