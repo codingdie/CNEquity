@@ -1327,6 +1327,40 @@ def _staged_daily_bar_partial_symbols(
     }
 
 
+def _undated_etf_pre_trading_sessions(
+    symbol: str,
+    span: tuple[date | None, date | None] | tuple[date | None, date | None, str | None],
+    sessions: list[date],
+    status_by_symbol: dict[str, dict[date, bool | None]],
+    bar_universe: set[str] | None,
+) -> set[date]:
+    """Return provably pre-trading sessions for an undated, newly listed ETF.
+
+    TDX omits ``list_date`` for some ETFs.  A five-session reconciliation can
+    therefore cross the listing boundary: a normal status appears only after
+    the ETF is listed, while the earlier sessions have no status row at all.
+    Treat only that leading prefix as outside the bar window.  An established
+    ETF, an explicit suspended session, or a gap after its first normal status
+    remains a strict coverage obligation.
+    """
+    list_date = span[0]
+    asset_type = span[2] if len(span) >= 3 else None
+    normalized = str(symbol).strip().upper()
+    if (
+        asset_type != "etf"
+        or list_date is not None
+        or bar_universe is None
+        or normalized in bar_universe
+    ):
+        return set()
+
+    status = status_by_symbol.get(normalized, {})
+    first_trading = next((day for day in sessions if status.get(day) is True), None)
+    if first_trading is None:
+        return set()
+    return {day for day in sessions if day < first_trading and day not in status}
+
+
 def _staged_daily_bar_missing_keys(
     config: Config,
     run_id: str,
@@ -1362,6 +1396,7 @@ def _staged_daily_bar_missing_keys(
     observed_symbols = set(staged["symbol"].to_list())
     missing: set[tuple[str, date]] = set()
     metadata = _instrument_spans(config)
+    bar_universe = _etf_placeholder_bar_universe(config, metadata)
     status_by_symbol: dict[str, dict[date, bool | None]] = {}
     status = load_curated_trading_status(
         config,
@@ -1383,10 +1418,14 @@ def _staged_daily_bar_missing_keys(
         expected_start = max(start, list_date) if list_date is not None else start
         expected_end = min(end, delist_date) if delist_date is not None else end
         expected = {session for session in sessions if expected_start <= session <= expected_end}
+        pre_trading = _undated_etf_pre_trading_sessions(
+            row["symbol"], span, sessions, status_by_symbol, bar_universe
+        )
         missing.update(
             (row["symbol"], day)
             for day in expected - set(row["dates"])
-            if status_by_symbol.get(row["symbol"], {}).get(day) is not False
+            if day not in pre_trading
+            and status_by_symbol.get(row["symbol"], {}).get(day) is not False
         )
     # A symbol with no rows at all is handled by the explicit no-data/unknown
     # classifier.  This helper is specifically the interior partial-evidence
