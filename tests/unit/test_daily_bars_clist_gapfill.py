@@ -1022,6 +1022,51 @@ def test_multiday_partial_symbol_is_gapfilled_without_overwriting_primary_rows(
     assert _staged_daily_bar_symbols(cfg, run_id, None) == {symbol}
 
 
+def test_multiday_partial_gap_uses_sina_after_eastmoney(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    start, end = date(2024, 6, 20), date(2024, 6, 24)
+    missing_day = date(2024, 6, 21)
+    symbol = "600519.SH"
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx-start", _bar_frame([symbol], start)
+    )
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx-end", _bar_frame([symbol], end)
+    )
+    assert _staged_daily_bar_symbols(cfg, run_id, end) == {symbol}
+    calls: list[tuple[str, list[str]]] = []
+
+    def _kline(symbols, s, e, **k):
+        calls.append(("eastmoney", list(symbols)))
+        return pl.DataFrame()
+
+    def _sina(config, symbols, s, e, target_run_id, **kwargs):
+        calls.append(("sina", list(symbols)))
+        assert kwargs["only_missing_keys"] == {(symbol, missing_day)}
+        StagingWriter(config.staging_root).write_batch(
+            "daily_bars", target_run_id, "sina-final", _bar_frame([symbol], missing_day)
+        )
+        return {"rows_read": 1, "rows_written": 1}
+
+    monkeypatch.setattr("cnequity.adapters.eastmoney.bars.fetch_daily_bars", _kline)
+    monkeypatch.setattr("cnequity.steps.bars.fetch_bars_via_sina", _sina)
+
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=[symbol],
+        tdx_result={"rows_read": 2, "rows_written": 2, "failed_symbols": []},
+        sina_result=None,
+    )
+
+    assert calls == [("eastmoney", [symbol]), ("sina", [symbol])]
+    assert result["rows_written"] == 3
+
+
 def test_multiday_partial_symbol_detects_leading_session_gap(tmp_path):
     cfg = _cfg(tmp_path)
     run_id = Manifest(cfg.manifest_path).start_run("backfill")
