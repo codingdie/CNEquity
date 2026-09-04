@@ -552,6 +552,16 @@ def test_tip_total_loss_still_raises(tmp_path, monkeypatch):
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
         lambda *args, **kwargs: pl.DataFrame(),
     )
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda _config, symbols, *_args, **_kwargs: {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbols": len(symbols),
+            "failed_symbol_names": symbols,
+            "empty_symbol_names": symbols,
+        },
+    )
     with pytest.raises(RuntimeError, match="produced no staged tip rows"):
         _finish_daily_bars(
             cfg,
@@ -572,7 +582,8 @@ def test_tip_total_loss_still_raises(tmp_path, monkeypatch):
 
 def test_tip_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp_path, monkeypatch):
     # A market-sized response cannot prove that one remaining symbol had no
-    # data.  Without listing/status/source-empty evidence the unknown key must
+    # data. Without listing/status evidence, including after a vendor empty
+    # response, the unknown key must
     # keep the checkpoint blocked; there is no market-level 5% allowance.
     cfg = _cfg(tmp_path)
     manifest = Manifest(cfg.manifest_path)
@@ -604,6 +615,16 @@ def test_tip_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp_path
     monkeypatch.setattr(
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
         lambda *args, **kwargs: pl.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda _config, symbols, *_args, **_kwargs: {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbols": len(symbols),
+            "failed_symbol_names": symbols,
+            "empty_symbol_names": symbols,
+        },
     )
     with pytest.raises(RuntimeError, match="refusing to checkpoint"):
         _finish_daily_bars(
@@ -892,7 +913,7 @@ def test_multiday_large_partial_miss_blocks_checkpoint(tmp_path, monkeypatch):
         )
 
 
-def test_multiday_accepts_explicit_no_data_from_fallback(tmp_path, monkeypatch):
+def test_multiday_sina_empty_does_not_advance_coverage(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path)
     run_id = Manifest(cfg.manifest_path).start_run("backfill")
     start, end = date(2024, 6, 20), date(2024, 6, 28)
@@ -912,25 +933,22 @@ def test_multiday_accepts_explicit_no_data_from_fallback(tmp_path, monkeypatch):
         lambda *args, **kwargs: pl.DataFrame(),
     )
 
-    result = _finish_daily_bars(
-        cfg,
-        end,
-        run_id,
-        start=start,
-        end=end,
-        expected_tdx_symbols=["561833.SH"],
-        tdx_result={
-            "rows_read": 0,
-            "rows_written": 0,
-            "had_error": True,
-            "failed_symbols": ["561833.SH"],
-        },
-        sina_result=None,
-    )
-
-    assert result["rows_written"] == 0
-    findings = result["context_updates"]["audit_findings"]
-    assert any(f["check"] == "daily_bars_sina_expected_no_data" for f in findings)
+    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
+        _finish_daily_bars(
+            cfg,
+            end,
+            run_id,
+            start=start,
+            end=end,
+            expected_tdx_symbols=["561833.SH"],
+            tdx_result={
+                "rows_read": 0,
+                "rows_written": 0,
+                "had_error": True,
+                "failed_symbols": ["561833.SH"],
+            },
+            sina_result=None,
+        )
 
 
 def test_resolve_recovered_daily_batches_does_not_close_unrelated_failures(tmp_path):
@@ -1008,6 +1026,51 @@ def test_multiday_partial_symbol_is_gapfilled_without_overwriting_primary_rows(
     )
     assert result["rows_written"] == 3  # two primary rows + one recovered interior day
     assert _staged_daily_bar_symbols(cfg, run_id, None) == {symbol}
+
+
+def test_multiday_partial_gap_uses_sina_after_eastmoney(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    start, end = date(2024, 6, 20), date(2024, 6, 24)
+    missing_day = date(2024, 6, 21)
+    symbol = "600519.SH"
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx-start", _bar_frame([symbol], start)
+    )
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx-end", _bar_frame([symbol], end)
+    )
+    assert _staged_daily_bar_symbols(cfg, run_id, end) == {symbol}
+    calls: list[tuple[str, list[str]]] = []
+
+    def _kline(symbols, s, e, **k):
+        calls.append(("eastmoney", list(symbols)))
+        return pl.DataFrame()
+
+    def _sina(config, symbols, s, e, target_run_id, **kwargs):
+        calls.append(("sina", list(symbols)))
+        assert kwargs["only_missing_keys"] == {(symbol, missing_day)}
+        StagingWriter(config.staging_root).write_batch(
+            "daily_bars", target_run_id, "sina-final", _bar_frame([symbol], missing_day)
+        )
+        return {"rows_read": 1, "rows_written": 1}
+
+    monkeypatch.setattr("cnequity.adapters.eastmoney.bars.fetch_daily_bars", _kline)
+    monkeypatch.setattr("cnequity.steps.bars.fetch_bars_via_sina", _sina)
+
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=[symbol],
+        tdx_result={"rows_read": 2, "rows_written": 2, "failed_symbols": []},
+        sina_result=None,
+    )
+
+    assert calls == [("eastmoney", [symbol]), ("sina", [symbol])]
+    assert result["rows_written"] == 3
 
 
 def test_multiday_partial_symbol_detects_leading_session_gap(tmp_path):
