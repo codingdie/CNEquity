@@ -552,6 +552,10 @@ def test_tip_total_loss_still_raises(tmp_path, monkeypatch):
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
         lambda *args, **kwargs: pl.DataFrame(),
     )
+    monkeypatch.setattr(
+        "cnequity.steps.bars._gapfill_tip_via_sina",
+        lambda *args, **kwargs: {"rows_read": 0, "rows_written": 0, "complete": False},
+    )
     with pytest.raises(RuntimeError, match="produced no staged tip rows"):
         _finish_daily_bars(
             cfg,
@@ -605,6 +609,10 @@ def test_tip_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp_path
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
         lambda *args, **kwargs: pl.DataFrame(),
     )
+    monkeypatch.setattr(
+        "cnequity.steps.bars._gapfill_tip_via_sina",
+        lambda *args, **kwargs: {"rows_read": 0, "rows_written": 0, "complete": False},
+    )
     with pytest.raises(RuntimeError, match="refusing to checkpoint"):
         _finish_daily_bars(
             cfg,
@@ -647,6 +655,10 @@ def test_tip_large_partial_miss_blocks_checkpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
         lambda *args, **kwargs: pl.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars._gapfill_tip_via_sina",
+        lambda *args, **kwargs: {"rows_read": 0, "rows_written": 0, "complete": False},
     )
     with pytest.raises(RuntimeError, match="refusing to checkpoint"):
         _finish_daily_bars(

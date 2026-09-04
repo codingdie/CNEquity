@@ -531,13 +531,29 @@ def run_incremental_fetched(
             )
     if df.is_empty():
         out: dict = {"rows_read": 0, "rows_written": 0}
-        # An allowed empty live snapshot is still a successful observation.
-        # Record its capture date so stale scheduling does not retry forever,
-        # while preserving the separate no-watermark contract for rolling
-        # windows.  Required/watermarked feeds do not reach this branch with
-        # ``allow_empty=True`` unless their caller explicitly accepts an
-        # empty response, so they remain retryable by their own gate.
-        if allow_empty:
+        spec = DATASETS.get(dataset)
+        if spec is not None and spec.allow_empty_watermark:
+            # The adapter walked the full window and found no rows; treat every
+            # requested trading day as a confirmed absence, not a fetch gap.
+            # The reconciliation window may include a lookback overlap behind
+            # the watermark: those dates were already covered, so only the new
+            # dates after the watermark are a fresh confirmed-empty claim.
+            state = StateStore(config.meta_root)
+            watermark = state.get_date(dataset)
+            confirmed_days = incremental_trade_dates(config, dataset, trade_date)
+            if watermark is not None:
+                confirmed_days = [d for d in confirmed_days if d > watermark]
+            if confirmed_days:
+                state.add_date_set_members(dataset, "confirmed_empty_dates", confirmed_days)
+                state.update_max_date(dataset, max(confirmed_days))
+                out["confirmed_empty_dates"] = [d.isoformat() for d in confirmed_days]
+        elif allow_empty:
+            # An allowed empty live snapshot is still a successful observation.
+            # Record its capture date so stale scheduling does not retry forever,
+            # while preserving the separate no-watermark contract for rolling
+            # windows.  Required/watermarked feeds do not reach this branch with
+            # ``allow_empty=True`` unless their caller explicitly accepts an
+            # empty response, so they remain retryable by their own gate.
             if config.should_archive_raw(dataset) and raw_payload is None:
                 evidence = raw_archive_evidence
                 if evidence is None:
@@ -556,16 +572,6 @@ def run_incremental_fetched(
                     df=df,
                 )
             _mark_snapshot_capture(config, dataset, trade_date)
-        spec = DATASETS.get(dataset)
-        if spec is not None and spec.allow_empty_watermark:
-            # The adapter walked the full window and found no rows; treat every
-            # requested trading day as a confirmed absence, not a fetch gap.
-            confirmed_days = incremental_trade_dates(config, dataset, trade_date)
-            if confirmed_days:
-                state = StateStore(config.meta_root)
-                state.add_date_set_members(dataset, "confirmed_empty_dates", confirmed_days)
-                state.update_max_date(dataset, max(confirmed_days))
-                out["confirmed_empty_dates"] = [d.isoformat() for d in confirmed_days]
 
         if findings:
             out["context_updates"] = {"audit_findings": findings}
