@@ -1164,6 +1164,11 @@ def _finish_daily_bars(
         staged_symbols = _staged_daily_bar_symbols(config, run_id, end)
         missing_symbols = {symbol for symbol, _day in missing_pairs}
         missing_symbols.update((set(failed_symbols) | fallback_failed_symbols) - staged_symbols)
+        # A successful Sina request with no rows for this exact window is the
+        # terminal no-data result. Do not query it again or route it through
+        # strict missing-key recovery; it is certified below and persisted as
+        # bounded negative evidence.
+        missing_symbols.difference_update(source_empty_symbols)
         if missing_symbols and config.sources.get("sina", True):
             sessions = list_trading_dates(config, start, end)
             only_missing_keys = set(missing_pairs)
@@ -1190,7 +1195,7 @@ def _finish_daily_bars(
                 findings.append(
                     {
                         "dataset": "daily_bars",
-                        "severity": "warning",
+                        "severity": "info",
                         "check": "daily_bars_sina_expected_no_data",
                         "message": (
                             f"Sina returned no bars for {len(sina_empty_symbols)} symbol(s) over "
@@ -1202,6 +1207,11 @@ def _finish_daily_bars(
             missing_pairs = _staged_daily_bar_missing_keys(
                 config, run_id, all_expected_symbols, start, end
             )
+        missing_pairs = {
+            (symbol, session)
+            for symbol, session in missing_pairs
+            if symbol not in source_empty_symbols
+        }
         if missing_pairs:
             exchange = _reconcile_missing_szse_fund_pairs(
                 config,
@@ -2361,7 +2371,6 @@ def fetch_bars_via_sina(
             continue
         if failure_kind == "empty":
             empty.append(symbol)
-            failed.append(symbol)
             continue
         assert bars is not None
         covered_dates[symbol] = set(bars["trade_date"].to_list())
@@ -2369,7 +2378,7 @@ def fetch_bars_via_sina(
 
     expected_dates = set(list_trading_dates(config, start, end))
     for symbol in requested_symbols:
-        if symbol in failed:
+        if symbol in failed or symbol in empty:
             continue
         if expected_dates - covered_dates.get(symbol, set()):
             failed.append(symbol)
@@ -2402,7 +2411,6 @@ def fetch_bars_via_sina(
         # failed fallback symbols through the same historical gap-fill as TDX
         # failures; a count alone cannot identify which keys need recovery.
         result["failed_symbol_names"] = list(dict.fromkeys(failed))
-        result["empty_symbol_names"] = list(dict.fromkeys(empty))
         audit_findings.append(
             {
                 "dataset": "daily_bars",
@@ -2414,6 +2422,21 @@ def fetch_bars_via_sina(
                     f"(e.g. {', '.join(failed[:5])})"
                 ),
                 "empty_symbols": len(empty),
+            }
+        )
+    if empty:
+        result["empty_symbol_names"] = list(dict.fromkeys(empty))
+        audit_findings.append(
+            {
+                "dataset": "daily_bars",
+                "severity": "info",
+                "check": "fallback_source_empty",
+                "message": (
+                    f"Sina confirmed no bars for {len(empty)}/{len(requested_symbols)} "
+                    f"symbol(s) over {start}..{end}"
+                ),
+                "empty_symbols": len(empty),
+                "symbols": list(dict.fromkeys(empty)),
             }
         )
     if audit_findings:

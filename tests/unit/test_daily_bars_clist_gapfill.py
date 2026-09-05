@@ -1085,6 +1085,41 @@ def test_multiday_accepts_explicit_no_data_from_fallback(tmp_path, monkeypatch):
     assert any(f["check"] == "daily_bars_sina_expected_no_data" for f in findings)
 
 
+def test_multiday_sina_empty_is_terminal_without_another_sina_request(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    start, end = date(2024, 6, 20), date(2024, 6, 21)
+    symbol = "561833.SH"
+
+    monkeypatch.setattr("cnequity.steps.bars.list_trading_dates", lambda *args: [start, end])
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda *args, **kwargs: pytest.fail("Sina was already the terminal fallback"),
+    )
+
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=[symbol],
+        tdx_result={"rows_read": 0, "rows_written": 0, "had_error": False},
+        sina_result={
+            "rows_read": 0,
+            "rows_written": 0,
+            "empty_symbol_names": [symbol],
+        },
+    )
+
+    findings = result["context_updates"]["audit_findings"]
+    assert any(
+        finding["check"] == "daily_bars_expected_no_data"
+        and finding["reasons"][symbol] == "source_empty"
+        for finding in findings
+    )
+
+
 def test_resolve_recovered_daily_batches_does_not_close_unrelated_failures(tmp_path):
     cfg = _cfg(tmp_path)
     manifest = Manifest(cfg.manifest_path)

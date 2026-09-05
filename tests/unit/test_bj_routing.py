@@ -283,6 +283,28 @@ def test_one_dead_symbol_does_not_cost_the_whole_board(tmp_path):
     assert "920000.BJ" in finding["message"]
 
 
+def test_sina_empty_response_is_not_a_fetch_failure(tmp_path):
+    cfg = Config(data_root=tmp_path / "data", sources={"sina": True})
+    symbol = "920000.BJ"
+
+    result = fetch_bars_via_sina(
+        cfg,
+        [symbol],
+        date(2026, 7, 21),
+        date(2026, 7, 21),
+        "run-empty",
+        fetch=lambda _symbol, _client: pl.DataFrame(
+            schema={c: DAILY_BARS_SCHEMA[c] for c in _BAR_COLS}
+        ),
+    )
+
+    assert "failed_symbols" not in result
+    assert result["empty_symbol_names"] == [symbol]
+    finding = result["context_updates"]["audit_findings"][0]
+    assert finding["check"] == "fallback_source_empty"
+    assert finding["severity"] == "info"
+
+
 def test_no_fallback_symbols_is_a_cheap_noop(tmp_path):
     cfg = Config(data_root=tmp_path / "data", sources={"sina": True})
 
