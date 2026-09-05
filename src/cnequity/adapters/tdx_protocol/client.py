@@ -71,15 +71,18 @@ class TdxSourceError(RuntimeError):
     """
 
 
-# A validated (host, port) reused across fetches in this process. An upstream
-# bestip scan is slow (~75s) and intermittently selects a server that then
-# fails the actual fetch. Worse, some bundled hosts are TCP-reachable but
+# A validated (host, port) reused briefly across fetches in this process. An
+# upstream bestip scan is slow (~75s) and intermittently selects a server that
+# then fails the actual fetch. Worse, some bundled hosts are TCP-reachable but
 # return zero rows for every symbol (dead data feed), so we validate a
-# candidate by actually fetching a known bar before trusting it.
+# candidate by actually fetching a known bar before trusting it. The short TTL
+# makes this a health cache, not a static server selection.
 _TDX_SERVER_CACHE: tuple[str, int] | None = None
+_TDX_SERVER_CACHE_EXPIRES_AT = 0.0
+_TDX_SERVER_HEALTH_TTL_SECONDS = 60.0
 _TDX_TCP_TIMEOUT = 1.5
 _TDX_PROBE_SYMBOL = "000001"  # SSE composite; market=1
-_TDX_MAX_CANDIDATES = 16
+_TDX_MAX_CANDIDATES = 16  # Candidates per concurrent probe batch, not a total cap.
 _TDX_PROBE_CONCURRENCY = 8  # parallel probes; first live responder wins
 _TDX_FETCH_ATTEMPTS = 3  # server rotations before a bar fetch fails loud
 _TDX_SYMBOL_REQUEST_TIMEOUT_SECONDS = 30.0
@@ -91,9 +94,10 @@ _TDX_MIN_LISTED_PRE_CLOSE = 0.001
 
 def reset_tdx_server_cache() -> None:
     """Forget the cached TDX server so the next client re-probes (on failure)."""
-    global _TDX_SERVER_CACHE
+    global _TDX_SERVER_CACHE, _TDX_SERVER_CACHE_EXPIRES_AT
     with TDX_DISCOVERY_LOCK:
         _TDX_SERVER_CACHE = None
+        _TDX_SERVER_CACHE_EXPIRES_AT = 0.0
 
 
 def _reachable(host: str, port: int, timeout: float = _TDX_TCP_TIMEOUT) -> bool:
@@ -130,10 +134,16 @@ def _serves_data(host: str, port: int, timeout: int) -> bool:
 
 
 def _candidate_servers(config: Config | None) -> list[tuple[str, int]]:
-    """Configured host pool first (in order), then the bundled fallback hosts."""
+    """Health-probe candidates, with known-good endpoints ahead of shuffled fallback.
+
+    Ordering is only a probe priority: every endpoint still has to return a
+    real bar before it can be selected. Keeping the verified set ahead of the
+    randomized tail avoids a bad random batch excluding every usable server,
+    while the tail keeps fleet load distributed when priorities fail.
+    """
     import random
 
-    from cnequity.adapters.tdx_protocol.hosts import HQ_HOSTS
+    from cnequity.adapters.tdx_protocol.hosts import HQ_HOSTS, VERIFIED_HOSTS
 
     ordered: list[tuple[str, int]] = []
     if config is not None and config.tdx_host_pool:
@@ -142,9 +152,13 @@ def _candidate_servers(config: Config | None) -> list[tuple[str, int]]:
             if host and port.isdigit():
                 ordered.append((host, int(port)))
 
-    bundled = [(host, int(port)) for host, port in HQ_HOSTS]
-    random.shuffle(bundled)  # spread load across the fallback list
-    ordered.extend(bundled)
+    ordered.extend((host, int(port)) for host, port in VERIFIED_HOSTS)
+    priority = set(ordered)
+    bundled_tail = [
+        (host, int(port)) for host, port in HQ_HOSTS if (host, int(port)) not in priority
+    ]
+    random.shuffle(bundled_tail)  # Spread load only across the fallback tail.
+    ordered.extend(bundled_tail)
 
     seen: set[tuple[str, int]] = set()
     out: list[tuple[str, int]] = []
@@ -160,14 +174,15 @@ def _probe(host: str, port: int, timeout: int) -> bool:
 
 
 def _pick_reachable_server(config: Config | None = None, timeout: int = 10) -> tuple[str, int]:
-    """Probe candidates in parallel; return the first that serves real data.
+    """Probe the dynamic candidate pool; return the first server that serves data.
 
-    Parallel probing means the first future to resolve true is effectively the
-    lowest-latency live server, so selection is both fast and fastest-first.
+    Each batch runs in parallel and a failed batch advances to the next instead
+    of reporting a pool-wide outage. This keeps normal discovery bounded while
+    ensuring a live fallback outside the first batch is not hidden by chance.
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    candidates = _candidate_servers(config)[:_TDX_MAX_CANDIDATES]
+    candidates = _candidate_servers(config)
     if not candidates:
         raise TdxSourceError("no TDX candidate servers configured or bundled")
 
@@ -180,15 +195,17 @@ def _pick_reachable_server(config: Config | None = None, timeout: int = 10) -> t
         with source_request(config, "tdx_protocol"):
             return _probe(host, port, timeout)
 
-    with ThreadPoolExecutor(max_workers=min(len(candidates), _TDX_PROBE_CONCURRENCY)) as pool:
-        futures = {pool.submit(_probe_one, h, p): (h, p) for h, p in candidates}
-        try:
-            for fut in _as_completed(futures):
-                if fut.result():
-                    return futures[fut]
-        finally:
-            for fut in futures:
-                fut.cancel()
+    for offset in range(0, len(candidates), _TDX_MAX_CANDIDATES):
+        batch = candidates[offset : offset + _TDX_MAX_CANDIDATES]
+        with ThreadPoolExecutor(max_workers=min(len(batch), _TDX_PROBE_CONCURRENCY)) as pool:
+            futures = {pool.submit(_probe_one, h, p): (h, p) for h, p in batch}
+            try:
+                for fut in _as_completed(futures):
+                    if fut.result():
+                        return futures[fut]
+            finally:
+                for fut in futures:
+                    fut.cancel()
     raise TdxSourceError(
         f"no TDX server responded with data (probed {len(candidates)} host(s); "
         "network down or all feeds degraded)"
@@ -200,7 +217,7 @@ def _quotes_client(config: Config | None = None):
 
     Isolated so tests can monkeypatch it.
     """
-    global _TDX_SERVER_CACHE
+    global _TDX_SERVER_CACHE, _TDX_SERVER_CACHE_EXPIRES_AT
     from cnequity.adapters.tdx_protocol.quotes import Quotes
 
     timeout = config.tdx_connect_timeout_sec if config else 10
@@ -216,8 +233,9 @@ def _quotes_client(config: Config | None = None):
         # discovery/cache operation only; the returned client owns an
         # independent socket and all subsequent requests run concurrently.
         with TDX_DISCOVERY_LOCK:
-            if _TDX_SERVER_CACHE is None:
+            if _TDX_SERVER_CACHE is None or time.monotonic() >= _TDX_SERVER_CACHE_EXPIRES_AT:
                 _TDX_SERVER_CACHE = _pick_reachable_server(config, timeout=timeout)
+                _TDX_SERVER_CACHE_EXPIRES_AT = time.monotonic() + _TDX_SERVER_HEALTH_TTL_SECONDS
             server = _TDX_SERVER_CACHE
         kwargs["server"] = server
     else:
