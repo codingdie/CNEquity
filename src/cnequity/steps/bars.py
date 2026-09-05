@@ -1127,6 +1127,12 @@ def _finish_daily_bars(
             if unknown:
                 preview = ", ".join(sorted(unknown)[:8])
                 suffix = "..." if len(unknown) > 8 else ""
+                unknown_keys = [
+                    {"symbol": symbol, "trade_date": end.isoformat()} for symbol in sorted(unknown)
+                ]
+                key_preview = ", ".join(
+                    f"{key['symbol']}@{key['trade_date']}" for key in unknown_keys[:8]
+                )
                 findings.append(
                     {
                         "dataset": "daily_bars",
@@ -1139,18 +1145,19 @@ def _finish_daily_bars(
                         ),
                         "missing_keys": len(unknown),
                         "symbols": sorted(unknown),
+                        "sample_keys": unknown_keys[:8],
                     }
                 )
                 if not staged:
                     raise RuntimeError(
                         f"daily_bars {end}: primary/fallback and EastMoney clist/kline "
                         f"gap-fill produced no staged tip rows for {len(unknown)} "
-                        "unknown key(s)"
+                        f"unknown key(s): {key_preview}{suffix}"
                     )
                 raise RuntimeError(
                     f"daily_bars {end}: {len(unknown)} expected tip key(s) remain "
-                    "unknown after failover; refusing to checkpoint a partial "
-                    "market snapshot"
+                    "unknown after failover; refusing to checkpoint a partial market "
+                    f"snapshot: {key_preview}{suffix}"
                 )
         if expected_symbols:
             _resolve_recovered_daily_batches(
@@ -1203,6 +1210,12 @@ def _finish_daily_bars(
             if unknown:
                 preview = ", ".join(sorted(unknown)[:8])
                 suffix = "..." if len(unknown) > 8 else ""
+                unknown_keys = [
+                    {"symbol": symbol, "trade_date": end.isoformat()} for symbol in sorted(unknown)
+                ]
+                key_preview = ", ".join(
+                    f"{key['symbol']}@{key['trade_date']}" for key in unknown_keys[:8]
+                )
                 findings.append(
                     {
                         "dataset": "daily_bars",
@@ -1215,12 +1228,13 @@ def _finish_daily_bars(
                         ),
                         "missing_keys": len(unknown),
                         "symbols": sorted(unknown),
+                        "sample_keys": unknown_keys[:8],
                     }
                 )
                 raise RuntimeError(
                     f"daily_bars {start}..{end}: {len(unknown)} expected key(s) remain "
-                    "unknown after failover; refusing "
-                    "to checkpoint a partial market snapshot"
+                    "unknown after failover; refusing to checkpoint a partial market "
+                    f"snapshot: {key_preview}{suffix}"
                 )
 
     result: dict = {"rows_read": rows_read, "rows_written": rows_written}
