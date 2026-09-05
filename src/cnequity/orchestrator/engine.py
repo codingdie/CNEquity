@@ -765,15 +765,31 @@ class JobEngine:
         retryable = []
         for batch in self.manifest.get_retryable_batches(run_id):
             _, step = self._resolve_batch_step(batch)
-            if not step.requires_workers or batch["retry_count"] < self.config.max_retries:
+            if not self._worker_retry_budget_applies(batch, step) or batch[
+                "retry_count"
+            ] < self.config.max_retries:
                 retryable.append(batch)
         return retryable
+
+    @staticmethod
+    def _worker_retry_budget_applies(batch, step) -> bool:
+        """Whether a batch represents an actual worker request attempt.
+
+        ``daily_bars_ownership`` uses the daily-bars worker entry point only so
+        a changed instrument identity can reclassify its symbols on retry.  It
+        performs no source request itself; charging it against the durable
+        worker limit stranded stale "delegated delisted" receipts after the
+        security master corrected the identity.
+        """
+        return step.requires_workers and batch["task_id"] != "daily_bars_ownership"
 
     def _exhausted_worker_retry_count(self, run_id: str) -> int:
         exhausted = 0
         for batch in self.manifest.get_retryable_batches(run_id):
             _, step = self._resolve_batch_step(batch)
-            if step.requires_workers and batch["retry_count"] >= self.config.max_retries:
+            if self._worker_retry_budget_applies(batch, step) and batch[
+                "retry_count"
+            ] >= self.config.max_retries:
                 exhausted += 1
         return exhausted
 
@@ -954,7 +970,9 @@ class JobEngine:
             [
                 batch["batch_id"]
                 for batch in failed
-                if self._resolve_batch_step(batch)[1].requires_workers
+                if self._worker_retry_budget_applies(
+                    batch, self._resolve_batch_step(batch)[1]
+                )
             ],
         )
 
