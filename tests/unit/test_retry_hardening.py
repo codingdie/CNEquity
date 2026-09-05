@@ -365,6 +365,52 @@ def test_retry_legacy_unregistered_task_falls_back_to_dataset(tmp_path, monkeypa
     assert seen_steps == ["daily_bars"]
 
 
+def test_retry_rechecks_exhausted_daily_bar_ownership_after_identity_changes(tmp_path, monkeypatch):
+    cfg = Config(
+        data_root=tmp_path / "data",
+        tdx_allow_mock=True,
+        max_retries=2,
+        retry_backoff_seconds=0,
+    )
+    init_data_layout(cfg)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("daily", {"trade_date": "2024-06-28"})
+    manifest.start_batch(
+        run_id,
+        "ownership-stale",
+        task_id="daily_bars_ownership",
+        dataset="daily_bars",
+        symbols=["301686.SZ"],
+        window_start="2024-06-28",
+        window_end="2024-06-28",
+    )
+    manifest.finish_batch(
+        run_id,
+        "ownership-stale",
+        "warning",
+        error_message="delegated delisted symbols lack a complete recovery receipt",
+        retry_count=2,
+    )
+
+    engine = JobEngine(cfg)
+    seen_steps: list[str] = []
+
+    def recover(name, trade_date, resumed_run_id, context, *, retry_of=None):
+        seen_steps.append(name)
+        manifest.start_batch(resumed_run_id, "ownership-stale", name, "daily_bars")
+        manifest.finish_batch(resumed_run_id, "ownership-stale", "success")
+        return {"status": "success"}
+
+    monkeypatch.setattr(engine, "_run_step", recover)
+    monkeypatch.setattr(engine, "_run_finalize_steps", lambda *args, **kwargs: [])
+    result = engine.run_job("retry", run_id=run_id, retry_failed_only=True)
+
+    assert result["status"] == "success"
+    assert result["retry_exhausted"] == 0
+    assert seen_steps == ["daily_bars"]
+    assert manifest.get_batch(run_id, "ownership-stale")["retry_count"] == 2
+
+
 def test_worker_batch_specs_reads_manifest_window(tmp_path):
     cfg = Config(data_root=tmp_path / "data")
     init_data_layout(cfg)
