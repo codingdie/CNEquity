@@ -21,7 +21,7 @@
 | 频率 | 每日；历史回填默认从 2001-01-01 起，支持 `--start` 缩小窗口 |
 | 主键 | symbol |
 | 股票池 | 研究股票池使用 SH/SZ/BJ 前缀白名单 60/68/00/30/92；ETF/LOF 使用独立前缀 51/52/56/58/15/16，保留在 instruments/daily_bars |
-| 已知限制 | 快照中消失时推断 `delist_date`；东财分别从 A 股与 ETF/LOF clist 补充 `list_date`；ETF/LOF 保留在 instruments/daily_bars，但不进入 `all_a` 研究池 |
+| 已知限制 | 快照中消失不会推断 `delist_date`；SH/SZ 退市身份由完整 Baostock security master 对齐，BJ 保留显式退市修复结果；东财分别从 A 股与 ETF/LOF clist 补充 `list_date`；ETF/LOF 保留在 instruments/daily_bars，但不进入 `all_a` 研究池 |
 
 #### trading_calendar
 
