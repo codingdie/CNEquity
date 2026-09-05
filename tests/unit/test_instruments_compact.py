@@ -9,7 +9,10 @@ import cnequity.steps  # noqa: F401
 from cnequity.config import Config
 from cnequity.query.universe import UniverseCoverageError, tradable_symbols_on_date
 from cnequity.steps.common import instrument_metadata, load_symbols
-from cnequity.steps.delisted import write_delisted_identity_evidence
+from cnequity.steps.delisted import (
+    reconcile_derived_delisted_status,
+    write_delisted_identity_evidence,
+)
 from cnequity.steps.finalize import step_compact
 from cnequity.storage import StagingWriter
 from cnequity.storage.instruments import compact_instruments
@@ -195,6 +198,101 @@ def test_compact_instruments_keeps_bj_recovery_date_outside_baostock_scope(tmp_p
 
     merged = pl.read_parquet(curated_path)
     assert merged.filter(pl.col("symbol") == "920001.BJ")["delist_date"].item() == date(2024, 6, 20)
+
+
+def test_compact_retracts_stale_derived_delisted_status_after_identity_repair(tmp_path):
+    """A retracted catalog identity must also retract its derived status cache."""
+    cfg = Config(data_root=tmp_path / "data")
+    trade_date = date(2026, 9, 5)
+    target = "301686.SZ"
+    instruments = cfg.curated_root / "instruments"
+    instruments.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            _instrument("600519.SH"),
+            _instrument(target, delist_date=date(2026, 9, 4)),
+        ]
+    ).write_parquet(instruments / "part-merged.parquet")
+    status = cfg.curated_root / "trading_status" / "trade_date=2026-09"
+    status.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": [target, "600519.SH"],
+            "trade_date": [date(2026, 9, 4), date(2026, 9, 4)],
+            "is_trading": [False, True],
+            "status": ["delisted", "normal"],
+            "risk_warning": [False, False],
+            "source": ["derived_delisted", "eastmoney"],
+            "data_version": ["v1", "v1"],
+            "fetched_at": [
+                datetime(2026, 9, 4, tzinfo=timezone.utc),
+                datetime(2026, 9, 4, tzinfo=timezone.utc),
+            ],
+        }
+    ).write_parquet(status / "part-merged.parquet")
+    # A complete security-master observation that omits the target is the
+    # authority to clear its old inferred delist_date.
+    _write_formal_delist_identity(cfg, {"600001.SH": date(2009, 12, 25)})
+    StagingWriter(cfg.staging_root).write_batch(
+        "instruments",
+        "run-retract-derived-status",
+        "batch-0",
+        pl.DataFrame([_instrument("600519.SH"), _instrument(target)]),
+    )
+
+    result = step_compact(cfg, trade_date, "run-retract-derived-status", {})
+
+    repaired = pl.read_parquet(status / "part-merged.parquet")
+    assert repaired.filter(pl.col("symbol") == target).is_empty()
+    assert repaired.filter(pl.col("symbol") == "600519.SH")["status"].item() == "normal"
+    assert "trading_status" in result["dataset_revisions"]
+
+
+def test_compact_keeps_bj_derived_status_outside_baostock_identity_scope(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    trade_date = date(2024, 6, 28)
+    target = "920001.BJ"
+    instruments = cfg.curated_root / "instruments"
+    instruments.mkdir(parents=True)
+    pl.DataFrame([_instrument("600519.SH"), _instrument(target)]).write_parquet(
+        instruments / "part-merged.parquet"
+    )
+    status = cfg.curated_root / "trading_status" / "trade_date=2024-06"
+    status.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": [target],
+            "trade_date": [date(2024, 6, 20)],
+            "is_trading": [False],
+            "status": ["delisted"],
+            "risk_warning": [False],
+            "source": ["derived_delisted"],
+            "data_version": ["v1"],
+            "fetched_at": [datetime(2024, 6, 20, tzinfo=timezone.utc)],
+        }
+    ).write_parquet(status / "part-merged.parquet")
+    _write_formal_delist_identity(cfg, {"600001.SH": date(2009, 12, 25)})
+    StagingWriter(cfg.staging_root).write_batch(
+        "instruments",
+        "run-keep-bj-derived-status",
+        "batch-0",
+        pl.DataFrame(
+            [_instrument("600519.SH"), _instrument(target, delist_date=date(2024, 6, 20))]
+        ),
+    )
+
+    result = step_compact(cfg, trade_date, "run-keep-bj-derived-status", {})
+
+    repaired = pl.read_parquet(status / "part-merged.parquet")
+    assert repaired.filter(pl.col("symbol") == target)["source"].item() == "derived_delisted"
+    assert "trading_status" not in result.get("dataset_revisions", {})
+
+    removed, changed = reconcile_derived_delisted_status(cfg)
+
+    assert removed == 0
+    assert changed == []
+    repaired = pl.read_parquet(status / "part-merged.parquet")
+    assert repaired.filter(pl.col("symbol") == target)["source"].item() == "derived_delisted"
 
 
 def test_compact_instruments_ignores_known_delisted_symbols_for_absence_circuit(tmp_path):

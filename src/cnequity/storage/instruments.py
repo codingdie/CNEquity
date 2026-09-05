@@ -122,6 +122,7 @@ def compact_instruments(
     trade_date: date,
     changed_files: list[Path] | None = None,
     base_root: Path | None = None,
+    delist_identity_changed: set[str] | None = None,
 ) -> tuple[int, list[dict]]:
     """Merge staging instruments into curated, retaining symbols missing from TDX."""
     staging = StagingWriter(staging_root)
@@ -160,6 +161,10 @@ def compact_instruments(
         existing = dedupe_by_primary_key(existing, "instruments")
     else:
         existing = pl.DataFrame(schema=INSTRUMENTS_SCHEMA)
+    prior_delist_dates = {
+        row["symbol"]: row["delist_date"]
+        for row in existing.select("symbol", "delist_date").iter_rows(named=True)
+    }
     # Preserve the raw generation's digest.  Identity reconciliation below can
     # intentionally change an existing row even when the incoming snapshot did
     # not, and that repair must still be written.
@@ -204,6 +209,17 @@ def compact_instruments(
 
     merged = pl.concat([incoming, preserved], how="diagonal_relaxed")
     merged = dedupe_by_primary_key(merged, "instruments")
+    if delist_identity_changed is not None:
+        current_delist_dates = {
+            row["symbol"]: row["delist_date"]
+            for row in merged.select("symbol", "delist_date").iter_rows(named=True)
+        }
+        delist_identity_changed.update(
+            symbol
+            for symbol in prior_delist_dates | current_delist_dates
+            if symbol.rpartition(".")[2] in _BAOSTOCK_FORMAL_EXCHANGES
+            and prior_delist_dates.get(symbol) != current_delist_dates.get(symbol)
+        )
 
     after_business_digest = _business_digest(merged)
     business_changed = before_business_digest != after_business_digest
