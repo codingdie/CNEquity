@@ -831,6 +831,124 @@ def _record_certified_daily_no_data(
         )
 
 
+def _staged_daily_bar_dates(
+    config: Config,
+    run_id: str,
+    symbols: set[str],
+    start: date,
+    end: date,
+) -> dict[str, set[date]]:
+    """Return staged daily-bar dates per symbol for a bounded window."""
+    import polars as pl
+
+    from cnequity.storage import StagingWriter
+
+    files = StagingWriter(config.staging_root).list_run_files("daily_bars", run_id)
+    if not files or not symbols:
+        return {}
+    frame = (
+        pl.scan_parquet([str(path) for path in files])
+        .filter(
+            (pl.col("symbol").is_in(sorted(symbols)))
+            & (pl.col("trade_date") >= start)
+            & (pl.col("trade_date") <= end)
+        )
+        .select("symbol", "trade_date")
+        .unique()
+        .collect()
+    )
+    dates: dict[str, set[date]] = {}
+    for row in frame.iter_rows(named=True):
+        dates.setdefault(row["symbol"], set()).add(row["trade_date"])
+    return dates
+
+
+def _reconcile_missing_szse_fund_pairs(
+    config: Config,
+    run_id: str,
+    missing_pairs: set[tuple[str, date]],
+    start: date,
+    end: date,
+) -> dict:
+    """Use SZSE's fund history to resolve individual missing Shenzhen dates.
+
+    The exchange publishes a row only for actual trades.  To distinguish that
+    fact from an unsupported code or a truncated response, every no-trade
+    assertion requires at least one same-window date that appears in both the
+    exchange response and the already staged bars for the very same symbol.
+    """
+    import polars as pl
+
+    from cnequity.adapters.exchange.daily_quotes import (
+        SzseFundHistoryUnavailable,
+        fetch_szse_fund_history,
+    )
+    from cnequity.domain.schemas import with_provenance
+    from cnequity.domain.symbols import is_etf_symbol, parse_symbol
+    from cnequity.storage import StagingWriter
+
+    by_symbol: dict[str, set[date]] = {}
+    for symbol, day in missing_pairs:
+        try:
+            info = parse_symbol(symbol)
+        except ValueError:
+            continue
+        if info.exchange == "SZ" and is_etf_symbol(info.code, info.exchange):
+            by_symbol.setdefault(info.symbol, set()).add(day)
+    if not by_symbol:
+        return {
+            "rows_read": 0,
+            "rows_written": 0,
+            "confirmed_no_trade_pairs": set(),
+            "unverified_symbols": set(),
+        }
+
+    staged_dates = _staged_daily_bar_dates(config, run_id, set(by_symbol), start, end)
+    writer = StagingWriter(config.staging_root)
+    confirmed_no_trade_pairs: set[tuple[str, date]] = set()
+    unverified_symbols: set[str] = set()
+    rows_read = 0
+    rows_written = 0
+    for symbol, target_dates in sorted(by_symbol.items()):
+        try:
+            exchange = fetch_szse_fund_history(symbol, start, end, config=config)
+        except SzseFundHistoryUnavailable as exc:
+            logger.warning("daily_bars: SZSE history could not verify %s: %s", symbol, exc)
+            unverified_symbols.add(symbol)
+            continue
+        rows_read += exchange.height
+        exchange_dates = set(exchange.get_column("trade_date").to_list())
+        if not exchange_dates.intersection(staged_dates.get(symbol, set())):
+            # A successful response without a control is still not evidence
+            # that every omitted date is a genuine no-trade day.
+            unverified_symbols.add(symbol)
+            continue
+        recovered = exchange.filter(pl.col("trade_date").is_in(sorted(target_dates)))
+        if not recovered.is_empty():
+            staged = with_provenance(recovered, source="szse", data_version="fund-history-v1")
+            writer.write_batch("daily_bars", run_id, f"szse-history-{symbol[:6]}", staged)
+            rows_written += staged.height
+        confirmed_no_trade_pairs.update(
+            (symbol, day) for day in target_dates if day not in exchange_dates
+        )
+
+    for symbol, day in sorted(confirmed_no_trade_pairs):
+        _record_daily_negative_observations(
+            config,
+            {symbol},
+            day,
+            day,
+            reason="exchange_confirmed_no_trade",
+            source="szse_history",
+        )
+    return {
+        "rows_read": rows_read,
+        "rows_written": rows_written,
+        "confirmed_no_trade_pairs": confirmed_no_trade_pairs,
+        "unverified_symbols": unverified_symbols,
+    }
+
+
 def _finish_daily_bars(
     config: Config,
     trade_date: date,
@@ -862,6 +980,7 @@ def _finish_daily_bars(
         if str(symbol).strip()
     }
     source_empty_symbols: set[str] = set()
+    confirmed_no_trade_pairs: set[tuple[str, date]] = set()
     # Ownership was evaluated before this finalization call.  Persist those
     # fresh listing/status proofs even when every requested symbol was routed
     # out of the fetch sets and therefore there is no later missing-key pass.
@@ -1084,6 +1203,55 @@ def _finish_daily_bars(
                 config, run_id, all_expected_symbols, start, end
             )
         if missing_pairs:
+            exchange = _reconcile_missing_szse_fund_pairs(
+                config,
+                run_id,
+                missing_pairs,
+                start,
+                end,
+            )
+            rows_read += int(exchange["rows_read"])
+            rows_written += int(exchange["rows_written"])
+            newly_confirmed_no_trade_pairs = set(exchange["confirmed_no_trade_pairs"])
+            confirmed_no_trade_pairs.update(newly_confirmed_no_trade_pairs)
+            if newly_confirmed_no_trade_pairs:
+                missing_pairs -= newly_confirmed_no_trade_pairs
+                findings.append(
+                    {
+                        "dataset": "daily_bars",
+                        "severity": "info",
+                        "check": "daily_bars_szse_confirmed_no_trade",
+                        "message": (
+                            f"SZSE history confirmed no trades for {len(newly_confirmed_no_trade_pairs)} "
+                            f"missing symbol×session key(s) over {start}..{end}"
+                        ),
+                        "missing_keys": len(newly_confirmed_no_trade_pairs),
+                        "symbols": sorted(
+                            {symbol for symbol, _day in newly_confirmed_no_trade_pairs}
+                        ),
+                    }
+                )
+            if exchange["unverified_symbols"]:
+                findings.append(
+                    {
+                        "dataset": "daily_bars",
+                        "severity": "warning",
+                        "check": "daily_bars_szse_history_unverified",
+                        "message": (
+                            "SZSE history could not establish same-window coverage for "
+                            f"{len(exchange['unverified_symbols'])} symbol(s); missing keys remain strict"
+                        ),
+                        "symbols": sorted(exchange["unverified_symbols"]),
+                    }
+                )
+            # Re-read after staging any official exchange rows.  The only
+            # keys removed without a bar are the individual no-trade pairs
+            # proven above.
+            missing_pairs = (
+                _staged_daily_bar_missing_keys(config, run_id, all_expected_symbols, start, end)
+                - confirmed_no_trade_pairs
+            )
+        if missing_pairs:
             missing_symbols = {symbol for symbol, _day in missing_pairs}
             finding = {
                 "dataset": "daily_bars",
@@ -1194,6 +1362,17 @@ def _finish_daily_bars(
         )
         staged = _staged_daily_bar_symbols(config, run_id, end)
         missing_staged = set(all_expected_symbols) - staged
+        if missing_staged and confirmed_no_trade_pairs:
+            staged_dates = _staged_daily_bar_dates(config, run_id, missing_staged, start, end)
+            sessions = set(list_trading_dates(config, start, end))
+            missing_staged = {
+                symbol
+                for symbol in missing_staged
+                if any(
+                    (symbol, session) not in confirmed_no_trade_pairs
+                    for session in sessions - staged_dates.get(symbol, set())
+                )
+            }
         if missing_staged:
             certified, unknown, ownership = _certify_missing_daily_symbols(
                 config,
@@ -1250,6 +1429,11 @@ def _finish_daily_bars(
                     "unknown after failover; refusing "
                     "to checkpoint a partial market snapshot"
                 )
+        _resolve_recovered_daily_batches(
+            config,
+            run_id,
+            resolved_symbols=set(all_expected_symbols),
+        )
 
     result: dict = {"rows_read": rows_read, "rows_written": rows_written}
     metrics = dict(tdx_result.get("metrics") or {})

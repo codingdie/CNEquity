@@ -260,6 +260,49 @@ def test_szse_missing_columns_are_reported_not_guessed(monkeypatch):
     assert daily_quotes.fetch_szse_daily_quotes(TRADE_DATE).is_empty()
 
 
+def test_szse_fund_history_parses_official_lots_as_shares(monkeypatch):
+    payload = {
+        "code": "0",
+        "data": {
+            "picupdata": [
+                ["2026-08-28", "3.534", "3.588", "3.517", "3.614", "0.088", "2.51", 707, 250613]
+            ]
+        },
+    }
+    monkeypatch.setattr(
+        daily_quotes,
+        "_client",
+        lambda: type("C", (), {"get": staticmethod(lambda *a, **k: _Resp(payload))}),
+    )
+    out = daily_quotes.fetch_szse_fund_history("160212.SZ", TRADE_DATE, TRADE_DATE)
+    assert out.to_dicts() == [
+        {
+            "symbol": "160212.SZ",
+            "trade_date": TRADE_DATE,
+            "open": 3.534,
+            "high": 3.614,
+            "low": 3.517,
+            "close": 3.588,
+            "volume": 70_700.0,
+            "amount": 250_613.0,
+        }
+    ]
+
+
+def test_szse_fund_history_rejects_a_source_error(monkeypatch):
+    monkeypatch.setattr(
+        daily_quotes,
+        "_client",
+        lambda: type(
+            "C",
+            (),
+            {"get": staticmethod(lambda *a, **k: _Resp({"code": "-1", "message": "unavailable"}))},
+        ),
+    )
+    with pytest.raises(daily_quotes.SzseFundHistoryUnavailable, match="unavailable"):
+        daily_quotes.fetch_szse_fund_history("160212.SZ", TRADE_DATE, TRADE_DATE)
+
+
 def test_combined_result_names_the_exchange_that_answered(monkeypatch):
     monkeypatch.setattr(
         daily_quotes, "fetch_sse_daily_quotes", lambda *a, **k: daily_quotes._EMPTY_QUOTES.clone()

@@ -807,6 +807,140 @@ def test_multiday_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp
         )
 
 
+def test_multiday_szse_fund_no_trade_is_confirmed_per_missing_date(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    start, end = date(2024, 6, 20), date(2024, 6, 21)
+    symbol = "160212.SZ"
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx-control", _bar_frame([symbol], start)
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
+        lambda *args, **kwargs: pl.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda *args, **kwargs: {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbols": 1,
+            "failed_symbol_names": [symbol],
+            "empty_symbol_names": [],
+        },
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.exchange.daily_quotes.fetch_szse_fund_history",
+        lambda *args, **kwargs: _bar_frame([symbol], start).drop(
+            ["source", "data_version", "fetched_at"]
+        ),
+    )
+
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=[symbol],
+        tdx_result={"rows_read": 1, "rows_written": 1, "failed_symbols": []},
+        sina_result=None,
+    )
+
+    assert result["rows_written"] == 1
+    findings = result["context_updates"]["audit_findings"]
+    assert any(f["check"] == "daily_bars_szse_confirmed_no_trade" for f in findings)
+
+
+def test_multiday_szse_fund_history_stages_a_missing_official_bar(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    start, end = date(2024, 6, 20), date(2024, 6, 21)
+    symbol = "160212.SZ"
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx-control", _bar_frame([symbol], start)
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
+        lambda *args, **kwargs: pl.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda *args, **kwargs: {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbols": 1,
+            "failed_symbol_names": [symbol],
+            "empty_symbol_names": [],
+        },
+    )
+    history = pl.concat([_bar_frame([symbol], start), _bar_frame([symbol], end)]).drop(
+        ["source", "data_version", "fetched_at"]
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.exchange.daily_quotes.fetch_szse_fund_history",
+        lambda *args, **kwargs: history,
+    )
+
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=[symbol],
+        tdx_result={"rows_read": 1, "rows_written": 1, "failed_symbols": []},
+        sina_result=None,
+    )
+
+    assert result["rows_written"] == 2
+    staged = pl.concat(
+        [
+            pl.read_parquet(path)
+            for path in StagingWriter(cfg.staging_root).list_run_files("daily_bars", run_id)
+        ]
+    )
+    official = staged.filter((pl.col("symbol") == symbol) & (pl.col("trade_date") == end))
+    assert official.select("source").item() == "szse"
+
+
+def test_multiday_szse_history_without_control_stays_strict(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("backfill")
+    start, end = date(2024, 6, 20), date(2024, 6, 21)
+    symbol = "160212.SZ"
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
+        lambda *args, **kwargs: pl.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda *args, **kwargs: {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbols": 1,
+            "failed_symbol_names": [symbol],
+            "empty_symbol_names": [],
+        },
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.exchange.daily_quotes.fetch_szse_fund_history",
+        lambda *args, **kwargs: pl.DataFrame(),
+    )
+
+    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
+        _finish_daily_bars(
+            cfg,
+            end,
+            run_id,
+            start=start,
+            end=end,
+            expected_tdx_symbols=[symbol],
+            tdx_result={"rows_read": 0, "rows_written": 0, "failed_symbols": [symbol]},
+            sina_result=None,
+        )
+
+
 def test_multiday_single_symbol_scope_still_raises(tmp_path, monkeypatch):
     # The tolerance above must not apply to a narrow explicit scope — a
     # scoped backfill or a `cne retry` batch of just one or two symbols,

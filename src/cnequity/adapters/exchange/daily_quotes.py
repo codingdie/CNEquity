@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import warnings
 from dataclasses import dataclass
 from datetime import date
@@ -36,7 +37,7 @@ from datetime import date
 import polars as pl
 
 from cnequity.domain.rate_limit import source_request
-from cnequity.domain.symbols import format_symbol, is_all_a_symbol, is_etf_symbol
+from cnequity.domain.symbols import format_symbol, is_all_a_symbol, is_etf_symbol, parse_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,24 @@ SZSE_URL = (
     "&txtBeginDate={day}&txtEndDate={day}&random=0.1"
 )
 _SZSE_HEADERS = {"Referer": "https://www.szse.cn/"}
+# This is the market site's historical-K endpoint, separate from the older
+# report export above.  It covers listed Shenzhen funds and reports only days
+# on which the security actually traded.
+SZSE_FUND_HISTORY_URL = (
+    "https://www.szse.cn/api/market/ssjjhq/getHistoryData"
+    "?random=0.1&cycleType=32&marketId=1&code={code}"
+)
+_SZSE_FUND_HISTORY_COLUMNS = (
+    "trade_date",
+    "open",
+    "close",
+    "low",
+    "high",
+    "change",
+    "change_pct",
+    "volume_lots",
+    "amount",
+)
 _SZSE_COLUMNS = {
     "证券代码": "code",
     "开盘": "open",
@@ -95,6 +114,10 @@ _SZSE_SCALE = 10_000.0
 
 class ExchangeQuotesUnavailable(RuntimeError):
     """The publisher served nothing usable for the requested session."""
+
+
+class SzseFundHistoryUnavailable(ExchangeQuotesUnavailable):
+    """SZSE's fund history endpoint could not prove a requested window."""
 
 
 @dataclass(frozen=True)
@@ -266,6 +289,101 @@ def fetch_szse_daily_quotes(trade_date: date, *, config=None) -> pl.DataFrame:
         )
     if not rows:
         logger.warning("SZSE daily quotes returned no usable rows for %s", trade_date)
+    return _finish(rows)
+
+
+def fetch_szse_fund_history(
+    symbol: str,
+    start: date,
+    end: date,
+    *,
+    config=None,
+) -> pl.DataFrame:
+    """Return official Shenzhen fund bars in a bounded historical window.
+
+    ``picupdata`` lists actual trading sessions rather than publishing flat
+    zero-volume placeholders.  An empty result is therefore a meaningful
+    observation only when the caller also has a same-window traded control for
+    this symbol.  Transport and schema failures raise so callers never turn an
+    outage into a no-trade assertion.
+    """
+    try:
+        info = parse_symbol(symbol)
+    except ValueError as exc:
+        raise ValueError(f"invalid SZSE fund symbol {symbol!r}") from exc
+    if info.exchange != "SZ" or not is_etf_symbol(info.code, info.exchange):
+        raise ValueError(f"SZSE fund history only supports Shenzhen fund symbols, got {symbol!r}")
+    if end < start:
+        raise ValueError(f"invalid history window {start}..{end}")
+
+    try:
+        with source_request(config, _SOURCE):
+            response = _client().get(
+                SZSE_FUND_HISTORY_URL.format(code=info.code),
+                headers=_SZSE_HEADERS,
+                impersonate="chrome",
+                timeout=_TIMEOUT_SECONDS,
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        raise SzseFundHistoryUnavailable(
+            f"SZSE fund history unavailable for {symbol}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if not isinstance(payload, dict) or payload.get("code", "0") not in {0, "0", None}:
+        message = payload.get("message") if isinstance(payload, dict) else None
+        raise SzseFundHistoryUnavailable(
+            f"SZSE fund history rejected {symbol}: {message or payload!r}"
+        )
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("picupdata"), list):
+        raise SzseFundHistoryUnavailable(f"SZSE fund history has no picupdata for {symbol}")
+
+    rows: list[dict] = []
+    for item in data["picupdata"]:
+        if not isinstance(item, (list, tuple)) or len(item) < len(_SZSE_FUND_HISTORY_COLUMNS):
+            continue
+        try:
+            trade_date = date.fromisoformat(str(item[0]))
+        except ValueError:
+            continue
+        if not start <= trade_date <= end:
+            continue
+        try:
+            open_, close, low, high = (float(item[index]) for index in (1, 2, 3, 4))
+            # SZSE reports volume in lots; curated daily_bars stores shares.
+            volume = float(item[7]) * 100.0
+            amount = float(item[8])
+        except (TypeError, ValueError, IndexError) as exc:
+            raise SzseFundHistoryUnavailable(
+                f"SZSE fund history has malformed bar for {symbol} on {trade_date}"
+            ) from exc
+        values = (open_, high, low, close, volume, amount)
+        if any(value < 0 or not math.isfinite(value) for value in values):
+            raise SzseFundHistoryUnavailable(
+                f"SZSE fund history has invalid bar values for {symbol} on {trade_date}"
+            )
+        if (
+            min(open_, high, low, close) <= 0
+            or high < max(open_, close, low)
+            or low > min(open_, close, high)
+        ):
+            raise SzseFundHistoryUnavailable(
+                f"SZSE fund history has inconsistent OHLC for {symbol} on {trade_date}"
+            )
+        rows.append(
+            {
+                "symbol": format_symbol(info.code, "SZ"),
+                "trade_date": trade_date,
+                "open": open_,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": volume,
+                "amount": amount,
+            }
+        )
     return _finish(rows)
 
 
