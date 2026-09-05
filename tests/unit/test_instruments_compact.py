@@ -168,6 +168,54 @@ def test_compact_instruments_clears_historical_uncertified_delist_date(tmp_path)
     assert merged.filter(pl.col("symbol") == "301686.SZ")["delist_date"].item() is None
 
 
+def test_compact_retracts_stale_derived_delisted_status_after_identity_repair(tmp_path):
+    """A retracted catalog identity must also retract its derived status cache."""
+    cfg = Config(data_root=tmp_path / "data")
+    trade_date = date(2026, 9, 5)
+    target = "301686.SZ"
+    instruments = cfg.curated_root / "instruments"
+    instruments.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            _instrument("600519.SH"),
+            _instrument(target, delist_date=date(2026, 9, 4)),
+        ]
+    ).write_parquet(instruments / "part-merged.parquet")
+    status = cfg.curated_root / "trading_status" / "trade_date=2026-09"
+    status.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": [target, "600519.SH"],
+            "trade_date": [date(2026, 9, 4), date(2026, 9, 4)],
+            "is_trading": [False, True],
+            "status": ["delisted", "normal"],
+            "risk_warning": [False, False],
+            "source": ["derived_delisted", "eastmoney"],
+            "data_version": ["v1", "v1"],
+            "fetched_at": [
+                datetime(2026, 9, 4, tzinfo=timezone.utc),
+                datetime(2026, 9, 4, tzinfo=timezone.utc),
+            ],
+        }
+    ).write_parquet(status / "part-merged.parquet")
+    # A complete security-master observation that omits the target is the
+    # authority to clear its old inferred delist_date.
+    _write_formal_delist_identity(cfg, {"600001.SH": date(2009, 12, 25)})
+    StagingWriter(cfg.staging_root).write_batch(
+        "instruments",
+        "run-retract-derived-status",
+        "batch-0",
+        pl.DataFrame([_instrument("600519.SH"), _instrument(target)]),
+    )
+
+    result = step_compact(cfg, trade_date, "run-retract-derived-status", {})
+
+    repaired = pl.read_parquet(status / "part-merged.parquet")
+    assert repaired.filter(pl.col("symbol") == target).is_empty()
+    assert repaired.filter(pl.col("symbol") == "600519.SH")["status"].item() == "normal"
+    assert "trading_status" in result["dataset_revisions"]
+
+
 def test_compact_instruments_ignores_known_delisted_symbols_for_absence_circuit(tmp_path):
     cfg = Config(data_root=tmp_path / "data")
     curated_path = cfg.curated_root / "instruments" / "part-merged.parquet"

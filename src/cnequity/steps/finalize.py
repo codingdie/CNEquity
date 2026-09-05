@@ -352,6 +352,7 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
     committed_revisions: dict[str, dict] = {}
     skipped: list[dict] = []
     audit_findings: list[dict] = []
+    changed_delist_identity_symbols: set[str] = set()
     revisions = RevisionStore(config.meta_root, config.curated_root)
     lineage = runtime_lineage(config)
 
@@ -397,6 +398,7 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                 trade_date,
                 changed_files=changed_files,
                 base_root=committed_root,
+                delist_identity_changed=changed_delist_identity_symbols,
             )
             if rows:
                 compacted.add(ds)
@@ -541,6 +543,69 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
                     "skipped",
                     criticality=_dataset_criticality(ds),
                     rows_written=rows,
+                )
+
+    # A derived delisting status is a materialized consequence of the formal
+    # instrument identity.  Once that identity changes, discard only the
+    # affected derived rows and publish their own status revision.  The status
+    # writer starts from the committed generation so a failed prior mutable
+    # write can never leak into this repair.
+    if "instruments" in committed_revisions and changed_delist_identity_symbols:
+        from cnequity.domain.contracts import contract_fingerprint, dataset_contract
+        from cnequity.steps.delisted import reconcile_derived_delisted_status
+
+        revisions.ensure_current("trading_status")
+        revisions.materialize_current("trading_status")
+        removed, status_changed_files = reconcile_derived_delisted_status(
+            config,
+            symbols=changed_delist_identity_symbols,
+        )
+        if status_changed_files:
+            try:
+                contract = dataset_contract("trading_status")
+                revision = revisions.commit(
+                    "trading_status",
+                    run_id=run_id,
+                    changed_files=status_changed_files,
+                    schema_version=int(contract["schema_version"]),
+                    contract_fingerprint=contract_fingerprint(contract),
+                    metadata={
+                        "trade_date": trade_date.isoformat(),
+                        "rows_removed": removed,
+                        "reason": "formal_delist_identity_reconciled",
+                        **lineage,
+                    },
+                    _locked=True,
+                )
+            except Exception as exc:
+                _record_dataset_result(
+                    config,
+                    run_id,
+                    "trading_status",
+                    "publish_revision",
+                    "failed",
+                    criticality=_dataset_criticality("trading_status"),
+                    rows_written=0,
+                    error_code=type(exc).__name__,
+                    error_message=str(exc),
+                )
+                raise
+            if revision is not None:
+                committed_revisions["trading_status"] = {
+                    "revision": revision.revision,
+                    "revision_id": revision.revision_id,
+                    "content_digest": revision.content_digest,
+                    "changed_partitions": list(revision.changed_partitions),
+                }
+                _record_dataset_result(
+                    config,
+                    run_id,
+                    "trading_status",
+                    "publish_revision",
+                    "success",
+                    criticality=_dataset_criticality("trading_status"),
+                    revision_id=revision.revision_id,
+                    rows_written=removed,
                 )
 
     if compacted:

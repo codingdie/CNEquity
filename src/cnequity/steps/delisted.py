@@ -455,9 +455,23 @@ def write_delisted_identity_evidence(config: Config, delisted: pl.DataFrame) -> 
 
 def known_delisted_instruments(config: Config, as_of: date) -> dict[str, date]:
     """Formal delisting identity from source evidence, independent of probes."""
+    evidence = formal_delisted_identity(config)
+    if evidence is None:
+        return {}
+    return {symbol: value for symbol, value in evidence.items() if value <= as_of}
+
+
+def formal_delisted_identity(config: Config) -> dict[str, date] | None:
+    """Return the complete Baostock delisting identity, or ``None`` when absent.
+
+    An empty dictionary is a valid complete observation.  It must remain
+    distinguishable from a missing or malformed record because callers that
+    retract derived status rows need proof that the security master was fully
+    observed before they remove anything.
+    """
     path = _identity_evidence_path(config)
     if not path.exists():
-        return {}
+        return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if (
@@ -466,14 +480,91 @@ def known_delisted_instruments(config: Config, as_of: date) -> dict[str, date]:
             or payload.get("status") != "complete"
             or payload.get("source") != "baostock.query_stock_basic"
         ):
-            return {}
+            return None
         evidence = {
             symbol: date.fromisoformat(value)
             for symbol, value in payload.get("delisted_symbols", {}).items()
         }
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return {}
-    return {symbol: value for symbol, value in evidence.items() if value <= as_of}
+        return None
+    return evidence
+
+
+def reconcile_derived_delisted_status(
+    config: Config,
+    *,
+    symbols: set[str] | None = None,
+) -> tuple[int, list[Path]]:
+    """Remove derived delisting rows no longer supported by formal identity.
+
+    ``derived_delisted`` is materialized from ``instruments`` and therefore is
+    a cache, not independent exchange evidence.  A complete Baostock security
+    master refresh can retract a former delisting claim; retain every vendor
+    and bar-gap status row, and remove only the derived rows whose symbol/date
+    is no longer certified.  Callers may pass the changed identity symbols to
+    avoid touching unrelated historical partitions.
+    """
+    from cnequity.domain.canonical import dedupe_by_primary_key
+    from cnequity.domain.schemas import validate_dataframe
+    from cnequity.domain.trading_status import DELISTED_SOURCE, normalize_legacy
+    from cnequity.query.parquet_scan import list_partitions, partition_dir
+    from cnequity.storage.parquet import CuratedWriter
+
+    formal = formal_delisted_identity(config)
+    if formal is None:
+        logger.warning(
+            "skip derived delisting status reconciliation: formal identity evidence is unavailable"
+        )
+        return 0, []
+    if symbols is not None and not symbols:
+        return 0, []
+
+    root = config.curated_root / "trading_status"
+    if not root.exists():
+        return 0, []
+    identity = pl.DataFrame(
+        {
+            "symbol": list(formal),
+            "_formal_delist_date": list(formal.values()),
+        },
+        schema={"symbol": pl.Utf8, "_formal_delist_date": pl.Date},
+    )
+    writer = CuratedWriter(config.curated_root)
+    removed = 0
+    changed: list[Path] = []
+    for part in list_partitions(root, "trade_date", resolve=False):
+        directory = partition_dir(root, "trade_date", part.value)
+        files = sorted(directory.rglob("*.parquet"))
+        if not files:
+            continue
+        frame = pl.concat(
+            [
+                validate_dataframe(normalize_legacy(pl.read_parquet(path)), "trading_status")
+                for path in files
+            ],
+            how="diagonal_relaxed",
+        )
+        frame = dedupe_by_primary_key(frame, "trading_status")
+        scoped = pl.col("symbol").is_in(sorted(symbols)) if symbols is not None else pl.lit(True)
+        candidate = frame.join(identity, on="symbol", how="left")
+        stale = (
+            (pl.col("source") == DELISTED_SOURCE)
+            & scoped
+            & (
+                pl.col("_formal_delist_date").is_null()
+                | (pl.col("_formal_delist_date") > pl.col("trade_date"))
+            )
+        )
+        count = candidate.filter(stale).height
+        if not count:
+            continue
+        cleaned = candidate.filter(~stale).drop("_formal_delist_date")
+        path = writer.write_partition(
+            "trading_status", "trade_date", part.value, cleaned, "part-merged.parquet"
+        )
+        changed.append(path)
+        removed += count
+    return removed, changed
 
 
 def delisted_recovery_targets(
