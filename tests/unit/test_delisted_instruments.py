@@ -7,7 +7,7 @@ import pytest
 
 from cnequity.adapters.baostock.instruments import fetch_instrument_basics
 from cnequity.config import Config
-from cnequity.steps.delisted import known_delisted_instruments
+from cnequity.steps.delisted import known_delisted_instruments, write_delisted_identity_evidence
 from cnequity.steps.reference import _merge_delisted_instruments
 from cnequity.storage.instruments import compact_instruments
 from cnequity.storage.parquet import StagingWriter
@@ -181,12 +181,23 @@ def _stage(cfg, run_id, df):
     StagingWriter(cfg.staging_root).write_batch("instruments", run_id, "batch-0", df)
 
 
+def _write_formal_delist_identity(cfg, dates):
+    write_delisted_identity_evidence(
+        cfg,
+        pl.DataFrame(
+            {"symbol": list(dates), "delist_date": list(dates.values())},
+            schema={"symbol": pl.Utf8, "delist_date": pl.Date},
+        ),
+    )
+
+
 def test_compact_preserves_explicit_delist_date(tmp_path):
     """A baostock delist_date must survive compact, not be blanket-nulled."""
     cfg = Config(data_root=tmp_path / "data")
     df = _live_snapshot(["600519.SH", "600001.SH"]).with_columns(
         pl.Series("delist_date", [None, date(2009, 12, 25)], dtype=pl.Date)
     )
+    _write_formal_delist_identity(cfg, {"600001.SH": date(2009, 12, 25)})
     _stage(cfg, "run-1", df)
 
     compact_instruments(cfg.staging_root, cfg.curated_root, "run-1", date(2026, 7, 21))
@@ -202,6 +213,7 @@ def test_compact_keeps_delist_date_sticky_across_runs(tmp_path):
     first = _live_snapshot(["600519.SH", "600001.SH"]).with_columns(
         pl.Series("delist_date", [None, date(2009, 12, 25)], dtype=pl.Date)
     )
+    _write_formal_delist_identity(cfg, {"600001.SH": date(2009, 12, 25)})
     _stage(cfg, "run-1", first)
     compact_instruments(cfg.staging_root, cfg.curated_root, "run-1", date(2026, 7, 21))
 

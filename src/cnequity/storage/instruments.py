@@ -16,33 +16,8 @@ from cnequity.domain.symbols import is_subscription_placeholder
 from cnequity.storage.atomic import write_parquet_atomic
 from cnequity.storage.parquet import StagingWriter
 
-# Refuse delist inference when too many symbols vanish from a snapshot — usually
-# a partial TDX fetch, not a mass delisting event.
-ABSENT_DELIST_THRESHOLD = 0.05
-# A live-universe snapshot is a point-in-time observation. Require repeated
-# absences before assigning a sticky delist_date; one partial fetch must not
-# permanently remove a still-trading name from all_a.
-ABSENT_DELIST_CONFIRMATIONS = 2
-
-
 def _absence_state_path(curated_root: Path) -> Path:
     return curated_root.parent / "meta" / "instruments_absence_streak.json"
-
-
-def _load_absence_state(path: Path) -> dict[str, dict[str, object]]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    return {
-        str(symbol): value
-        for symbol, value in payload.items()
-        if isinstance(value, dict) and isinstance(value.get("count"), int)
-    }
 
 
 def _save_absence_state(path: Path, state: dict[str, dict[str, object]]) -> None:
@@ -50,6 +25,63 @@ def _save_absence_state(path: Path, state: dict[str, dict[str, object]]) -> None
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(state, sort_keys=True, indent=2), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _formal_delist_dates(curated_root: Path, as_of: date) -> dict[str, date] | None:
+    """Read the complete security-master delisting identity observation.
+
+    A TDX/EastMoney instruments snapshot only answers which symbols it happened
+    to return.  Its absence is not a delisting event, regardless of how many
+    consecutive snapshots omit the symbol.  The Baostock full security-master
+    evidence is deliberately separate from instruments so compact can verify
+    the sticky ``delist_date`` instead of treating an old inference as fact.
+    """
+    path = (
+        curated_root.parent
+        / "meta"
+        / "quality"
+        / "evidence"
+        / "delisted_security_identity"
+        / "baostock-v1.json"
+    )
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            payload.get("claim") != "delisted_security_identity"
+            or payload.get("evidence_version") != 1
+            or payload.get("status") != "complete"
+            or payload.get("source") != "baostock.query_stock_basic"
+        ):
+            return None
+        dates = {
+            str(symbol): date.fromisoformat(value)
+            for symbol, value in payload.get("delisted_symbols", {}).items()
+        }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return {symbol: value for symbol, value in dates.items() if value <= as_of}
+
+
+def _apply_formal_delist_dates(
+    df: pl.DataFrame, formal_dates: dict[str, date]
+) -> pl.DataFrame:
+    """Keep dates only when independently certified by the security master."""
+    if df.is_empty() or "delist_date" not in df.columns:
+        return df
+    dates = pl.DataFrame(
+        {
+            "symbol": list(formal_dates),
+            "_formal_delist_date": list(formal_dates.values()),
+        },
+        schema={"symbol": pl.Utf8, "_formal_delist_date": pl.Date},
+    )
+    return (
+        df.drop("delist_date")
+        .join(dates, on="symbol", how="left")
+        .rename({"_formal_delist_date": "delist_date"})
+    )
 
 
 def _strip_subscription_placeholders(df: pl.DataFrame) -> pl.DataFrame:
@@ -117,84 +149,29 @@ def compact_instruments(
         existing = dedupe_by_primary_key(existing, "instruments")
     else:
         existing = pl.DataFrame(schema=INSTRUMENTS_SCHEMA)
+    # Preserve the raw generation's digest.  Identity reconciliation below can
+    # intentionally change an existing row even when the incoming snapshot did
+    # not, and that repair must still be written.
+    before_business_digest = _business_digest(existing) if curated_files else None
 
+    # ``delist_date`` is an identity claim, not a conclusion from the daily
+    # live snapshot.  Earlier compact versions inferred it after two missing
+    # snapshots, which mislabeled newly listed symbols when a TDX page was
+    # incomplete.  Reconcile every candidate against the independent, complete
+    # Baostock security-master evidence and thereby repair those old claims.
+    # A missing or malformed evidence record is deliberately not equivalent to
+    # a complete observation with zero delistings: retain the old dates until a
+    # successful security-master refresh can decide them.
+    formal_dates = _formal_delist_dates(curated_root, trade_date)
+    if formal_dates is not None:
+        incoming = _apply_formal_delist_dates(incoming, formal_dates)
     incoming_symbols = incoming["symbol"].to_list()
     findings: list[dict] = []
     absence_path = _absence_state_path(curated_root)
-    absence_state = _load_absence_state(absence_path)
     if not existing.is_empty():
+        if formal_dates is not None:
+            existing = _apply_formal_delist_dates(existing, formal_dates)
         preserved = existing.filter(~pl.col("symbol").is_in(incoming_symbols))
-        # Symbols with a known delist date before this snapshot are expected
-        # to be absent.  Counting them in the circuit breaker made a mature
-        # catalog look like a partial fetch on every run, eventually masking
-        # genuine omissions from the still-live universe.
-        expected_live = existing.filter(
-            pl.col("delist_date").is_null() | (pl.col("delist_date") >= trade_date)
-        )
-        absent_live = expected_live.filter(~pl.col("symbol").is_in(incoming_symbols))
-        absent_count = absent_live.height
-        expected_live_count = expected_live.height
-        absent_ratio = absent_count / expected_live_count if expected_live_count else 0.0
-        if absent_count and absent_ratio > ABSENT_DELIST_THRESHOLD:
-            findings.append(
-                {
-                    "dataset": "instruments",
-                    "severity": "error",
-                    "check": "instruments_delist_suppressed",
-                    "message": (
-                        f"Refused to infer delist_date: {absent_count}/{expected_live_count} symbols "
-                        f"({absent_ratio:.1%}) absent from snapshot (>{ABSENT_DELIST_THRESHOLD:.0%} "
-                        "threshold); likely partial fetch"
-                    ),
-                    "absent_count": absent_count,
-                    "existing_count": expected_live_count,
-                    "absent_ratio": absent_ratio,
-                }
-            )
-        else:
-            inferred: dict[str, date] = {}
-            pending = 0
-            for row in absent_live.select("symbol", "delist_date").iter_rows(named=True):
-                symbol = row["symbol"]
-                if row["delist_date"] is not None:
-                    absence_state.pop(symbol, None)
-                    continue
-                prior = absence_state.get(symbol, {})
-                count = int(prior.get("count", 0)) + 1
-                absence_state[symbol] = {
-                    "count": count,
-                    "last_missing": trade_date.isoformat(),
-                }
-                if count >= ABSENT_DELIST_CONFIRMATIONS:
-                    inferred[symbol] = trade_date
-                    absence_state.pop(symbol, None)
-                else:
-                    pending += 1
-            if inferred:
-                delist_expr = pl.col("delist_date")
-                for symbol, inferred_date in inferred.items():
-                    delist_expr = (
-                        pl.when(pl.col("symbol") == symbol)
-                        .then(pl.lit(inferred_date))
-                        .otherwise(delist_expr)
-                    )
-                preserved = preserved.with_columns(delist_expr.alias("delist_date"))
-            if pending:
-                findings.append(
-                    {
-                        "dataset": "instruments",
-                        "severity": "warning",
-                        "check": "instruments_delist_pending",
-                        "message": (
-                            f"{pending}/{absent_count} absent symbol(s) need another "
-                            f"consecutive snapshot before delist inference "
-                            f"({ABSENT_DELIST_CONFIRMATIONS} confirmations required)"
-                        ),
-                        "pending_count": pending,
-                        "absent_count": absent_count,
-                        "confirmations_required": ABSENT_DELIST_CONFIRMATIONS,
-                    }
-                )
         prior_dates = existing.select(
             [
                 "symbol",
@@ -203,23 +180,18 @@ def compact_instruments(
             ]
         )
         incoming = incoming.join(prior_dates, on="symbol", how="left")
-        # Both dates are sticky: a live snapshot carries neither (TDX has no such
-        # field), so coalescing is what keeps a delist_date — inferred from an
-        # earlier absence or fetched from baostock — from being erased the next
-        # day. Never resurrect a name a prior run buried.
+        # List dates are snapshot metadata; formal delist dates were applied
+        # above from the independent identity evidence and remain sticky.
         incoming = incoming.with_columns(
             pl.coalesce(pl.col("list_date"), pl.col("_prior_list_date")).alias("list_date"),
             pl.coalesce(pl.col("delist_date"), pl.col("_prior_delist_date")).alias("delist_date"),
         ).drop("_prior_list_date", "_prior_delist_date")
-        for symbol in incoming_symbols:
-            absence_state.pop(symbol, None)
     else:
         preserved = pl.DataFrame(schema=INSTRUMENTS_SCHEMA)
 
     merged = pl.concat([incoming, preserved], how="diagonal_relaxed")
     merged = dedupe_by_primary_key(merged, "instruments")
 
-    before_business_digest = _business_digest(existing) if curated_files else None
     after_business_digest = _business_digest(merged)
     business_changed = before_business_digest != after_business_digest
     # A same-business-content refresh (for example only a new fetched_at or
@@ -243,5 +215,7 @@ def compact_instruments(
                 stale.unlink()
     if changed_files is not None and business_changed:
         changed_files.append(out_path)
-    _save_absence_state(absence_path, absence_state)
+    # Discard stale state written by the old absence-inference algorithm.  It
+    # has no authority to influence future security-master identity.
+    _save_absence_state(absence_path, {})
     return merged.height, findings

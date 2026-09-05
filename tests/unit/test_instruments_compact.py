@@ -9,6 +9,7 @@ import cnequity.steps  # noqa: F401
 from cnequity.config import Config
 from cnequity.query.universe import UniverseCoverageError, tradable_symbols_on_date
 from cnequity.steps.common import instrument_metadata, load_symbols
+from cnequity.steps.delisted import write_delisted_identity_evidence
 from cnequity.steps.finalize import step_compact
 from cnequity.storage import StagingWriter
 from cnequity.storage.instruments import compact_instruments
@@ -38,7 +39,17 @@ def _instrument(
     }
 
 
-def test_compact_instruments_preserves_missing_symbols_and_marks_delist(tmp_path):
+def _write_formal_delist_identity(cfg: Config, dates: dict[str, date]) -> None:
+    write_delisted_identity_evidence(
+        cfg,
+        pl.DataFrame(
+            {"symbol": list(dates), "delist_date": list(dates.values())},
+            schema={"symbol": pl.Utf8, "delist_date": pl.Date},
+        ),
+    )
+
+
+def test_compact_instruments_preserves_missing_symbols_without_inferring_delist(tmp_path):
     root = tmp_path / "data"
     cfg = Config(data_root=root)
     run_id = "run-inst"
@@ -68,7 +79,7 @@ def test_compact_instruments_preserves_missing_symbols_and_marks_delist(tmp_path
 
     rows, findings = compact_instruments(cfg.staging_root, cfg.curated_root, run_id, trade_date)
     assert rows == 100
-    assert findings and findings[0]["check"] == "instruments_delist_pending"
+    assert findings == []
 
     merged = pl.read_parquet(curated_path)
     delisted = merged.filter(pl.col("symbol") == "600000.SH")
@@ -88,13 +99,13 @@ def test_compact_instruments_preserves_missing_symbols_and_marks_delist(tmp_path
     assert findings == []
     merged = pl.read_parquet(curated_path)
     delisted = merged.filter(pl.col("symbol") == "600000.SH")
-    assert delisted["delist_date"][0] == date(2024, 7, 1)
+    assert delisted["delist_date"][0] is None
 
     active = merged.filter(pl.col("symbol") == "600519.SH")
     assert active["delist_date"][0] is None
 
 
-def test_compact_instruments_suppresses_delist_when_absent_ratio_exceeds_threshold(tmp_path):
+def test_compact_instruments_keeps_all_absent_symbols_live_without_identity_evidence(tmp_path):
     root = tmp_path / "data"
     cfg = Config(data_root=root)
     run_id = "run-circuit"
@@ -120,14 +131,41 @@ def test_compact_instruments_suppresses_delist_when_absent_ratio_exceeds_thresho
 
     rows, findings = compact_instruments(cfg.staging_root, cfg.curated_root, run_id, trade_date)
     assert rows == 10
-    assert len(findings) == 1
-    assert findings[0]["check"] == "instruments_delist_suppressed"
-    assert findings[0]["severity"] == "error"
+    assert findings == []
 
     merged = pl.read_parquet(curated_path)
     absent = merged.filter(pl.col("symbol") == "000001.SZ")
     assert absent.height == 1
     assert absent["delist_date"][0] is None
+
+
+def test_compact_instruments_clears_historical_uncertified_delist_date(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    curated_path = cfg.curated_root / "instruments" / "part-merged.parquet"
+    curated_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            _instrument("600519.SH"),
+            _instrument("301686.SZ", delist_date=date(2026, 9, 4)),
+        ]
+    ).write_parquet(curated_path)
+    _write_formal_delist_identity(cfg, {"600001.SH": date(2009, 12, 25)})
+
+    StagingWriter(cfg.staging_root).write_batch(
+        "instruments",
+        "run-clear-inferred-delist",
+        "batch-0",
+        pl.DataFrame([_instrument("600519.SH")]),
+    )
+    compact_instruments(
+        cfg.staging_root,
+        cfg.curated_root,
+        "run-clear-inferred-delist",
+        date(2026, 9, 5),
+    )
+
+    merged = pl.read_parquet(curated_path)
+    assert merged.filter(pl.col("symbol") == "301686.SZ")["delist_date"].item() is None
 
 
 def test_compact_instruments_ignores_known_delisted_symbols_for_absence_circuit(tmp_path):
@@ -149,6 +187,10 @@ def test_compact_instruments_ignores_known_delisted_symbols_for_absence_circuit(
         ),
     ]
     pl.DataFrame(existing_rows).write_parquet(curated_path)
+    _write_formal_delist_identity(
+        cfg,
+        {"600001.SH": date(2009, 12, 25), "000003.SZ": date(2002, 6, 14)},
+    )
 
     writer = StagingWriter(cfg.staging_root)
     writer.write_batch(
@@ -330,7 +372,7 @@ def test_compact_instruments_preserves_rows_from_nested_legacy_fragments(tmp_pat
     assert set(merged["symbol"]) == {"600519.SH", "000001.SZ"}
 
 
-def test_audit_emits_instruments_delist_suppressed_error(tmp_path):
+def test_audit_does_not_emit_absence_based_delist_error(tmp_path):
     from cnequity.steps.finalize import step_audit, step_compact
 
     root = tmp_path / "data"
@@ -360,11 +402,9 @@ def test_audit_emits_instruments_delist_suppressed_error(tmp_path):
     payload = json.loads(
         (cfg.meta_root / "quality" / "findings" / f"{run_id}.json").read_text(encoding="utf-8")
     )
-    suppressed = [
+    assert not [
         f for f in payload["findings"] if f.get("check") == "instruments_delist_suppressed"
     ]
-    assert len(suppressed) == 1
-    assert suppressed[0]["severity"] == "error"
 
 
 def test_tradable_universe_excludes_delisted_symbol(tmp_path):
