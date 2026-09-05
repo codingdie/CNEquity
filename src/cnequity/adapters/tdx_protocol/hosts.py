@@ -1,7 +1,9 @@
 """Fallback TDX standard-market hosts.
 
-Order matters: `_pick_reachable_server` probes a bounded prefix of this list,
-so anything past that window is never tried. Verified-live hosts come first.
+Order is probe priority: `_pick_reachable_server` tries verified-live hosts
+first, then scans the entire fallback list in bounded concurrent batches.
+Every chosen endpoint must pass a real-bar health probe, so the list is not a
+fixed server selection.
 
 The tail is mootdx 0.11.7's bundled list (MIT), kept only as a last resort —
 a full probe from an overseas egress on 2026-07-28 found every one of its 38

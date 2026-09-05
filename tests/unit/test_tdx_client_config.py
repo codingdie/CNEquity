@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from cnequity.adapters.tdx_protocol import client as tdx
@@ -88,6 +90,21 @@ def test_candidate_servers_prefers_config_pool(monkeypatch):
     assert len(candidates) > 2
 
 
+def test_candidate_servers_keeps_verified_nodes_ahead_of_shuffled_tail(monkeypatch):
+    from cnequity.adapters.tdx_protocol import hosts as hosts_mod
+
+    verified = (("1.1.1.1", 7709), ("2.2.2.2", 7709))
+    monkeypatch.setattr(hosts_mod, "VERIFIED_HOSTS", verified)
+    monkeypatch.setattr(
+        hosts_mod,
+        "HQ_HOSTS",
+        verified + (("3.3.3.3", 7709), ("4.4.4.4", 7709)),
+    )
+    monkeypatch.setattr("random.shuffle", lambda values: values.reverse())
+
+    assert tdx._candidate_servers(None)[:2] == list(verified)
+
+
 def test_pick_reachable_server_returns_first_functional(monkeypatch):
     _install_fake_quotes(monkeypatch)
     cfg = Config(data_root="/tmp/data")
@@ -110,6 +127,71 @@ def test_pick_reachable_server_raises_when_none_live(monkeypatch):
     monkeypatch.setattr(tdx, "_candidate_servers", lambda config: [("9.9.9.9", 7709)])
     with pytest.raises(tdx.TdxSourceError, match="no TDX server responded"):
         tdx._pick_reachable_server(None)
+
+
+def test_pick_reachable_server_scans_later_batches(monkeypatch):
+    _install_fake_quotes(monkeypatch)
+    candidates = [(f"10.0.0.{index}", 7709) for index in range(1, 18)]
+    monkeypatch.setattr(tdx, "_candidate_servers", lambda config: candidates)
+    monkeypatch.setattr(tdx, "_probe", lambda host, port, timeout: host == "10.0.0.17")
+
+    assert tdx._pick_reachable_server(None) == ("10.0.0.17", 7709)
+
+
+def test_pick_reachable_server_does_not_wait_for_inflight_loser(monkeypatch):
+    _install_fake_quotes(monkeypatch)
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    slow_finished = threading.Event()
+
+    def fake_probe(host, port, timeout):
+        if host == "10.0.0.1":
+            slow_started.set()
+            release_slow.wait(timeout=5)
+            slow_finished.set()
+            return False
+        assert slow_started.wait(timeout=1)
+        return True
+
+    monkeypatch.setattr(
+        tdx,
+        "_candidate_servers",
+        lambda config: [("10.0.0.1", 7709), ("10.0.0.2", 7709)],
+    )
+    monkeypatch.setattr(tdx, "_probe", fake_probe)
+    timer = threading.Timer(1, release_slow.set)
+    timer.start()
+    try:
+        assert tdx._pick_reachable_server(None) == ("10.0.0.2", 7709)
+        assert not release_slow.is_set()
+    finally:
+        release_slow.set()
+        timer.cancel()
+    assert slow_finished.wait(timeout=1)
+
+
+def test_quotes_client_refreshes_expired_health_cache(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_factory(**kwargs):
+        seen.update(kwargs)
+        return object()
+
+    _install_fake_quotes(monkeypatch, factory=fake_factory)
+    calls = []
+    monkeypatch.setattr(
+        tdx,
+        "_pick_reachable_server",
+        lambda config=None, timeout=10: calls.append((config, timeout)) or ("1.2.3.4", 7709),
+    )
+    tdx._TDX_SERVER_CACHE = ("9.9.9.9", 7709)
+    tdx._TDX_SERVER_CACHE_EXPIRES_AT = 0.0
+
+    tdx._quotes_client(Config(data_root="/tmp/data"))
+    tdx.reset_tdx_server_cache()
+
+    assert len(calls) == 1
+    assert seen["server"] == ("1.2.3.4", 7709)
 
 
 def test_serves_data_true_when_bars_return(monkeypatch):
