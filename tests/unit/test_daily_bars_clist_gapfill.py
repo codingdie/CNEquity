@@ -613,7 +613,7 @@ def test_tip_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp_path
         "cnequity.steps.bars._gapfill_tip_via_sina",
         lambda *args, **kwargs: {"rows_read": 0, "rows_written": 0, "complete": False},
     )
-    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
+    with pytest.raises(RuntimeError, match="refusing to checkpoint") as exc_info:
         _finish_daily_bars(
             cfg,
             tip,
@@ -629,6 +629,8 @@ def test_tip_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp_path
             },
             sina_result=None,
         )
+
+    assert f"000001.SZ@{tip.isoformat()}" in str(exc_info.value)
     assert manifest.get_batch(run_id, "tdx-partial")["status"] == "failed"
 
 
@@ -660,7 +662,7 @@ def test_tip_large_partial_miss_blocks_checkpoint(tmp_path, monkeypatch):
         "cnequity.steps.bars._gapfill_tip_via_sina",
         lambda *args, **kwargs: {"rows_read": 0, "rows_written": 0, "complete": False},
     )
-    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
+    with pytest.raises(RuntimeError, match="refusing to checkpoint") as exc_info:
         _finish_daily_bars(
             cfg,
             tip,
@@ -676,6 +678,8 @@ def test_tip_large_partial_miss_blocks_checkpoint(tmp_path, monkeypatch):
             },
             sina_result=None,
         )
+
+    assert f"{expected[1]}@{tip.isoformat()}" in str(exc_info.value)
 
 
 def test_multiday_uses_kline_not_clist(tmp_path, monkeypatch):
@@ -789,7 +793,7 @@ def test_multiday_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp
         },
     )
 
-    with pytest.raises(RuntimeError, match="refusing to checkpoint"):
+    with pytest.raises(RuntimeError, match="refusing to checkpoint") as exc_info:
         _finish_daily_bars(
             cfg,
             end,
@@ -805,6 +809,8 @@ def test_multiday_partial_miss_after_gapfill_stays_strict_for_unknown_symbol(tmp
             },
             sina_result=None,
         )
+
+    assert f"{missing}@{end.isoformat()}" in str(exc_info.value)
 
 
 def test_multiday_szse_fund_no_trade_is_confirmed_per_missing_date(tmp_path, monkeypatch):
