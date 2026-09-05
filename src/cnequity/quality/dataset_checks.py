@@ -610,6 +610,14 @@ def audit_curated_dataset(
         # month/year granularity is a period rather than the single day.
         partitions = list_partitions(root, partition_col)
         current = next((p for p in partitions if p.covers(trade_date)), None)
+        if current is None:
+            # A backfill can complete after the target session (or before an
+            # intraday writer has emitted today's partition).  A routine audit
+            # must stay bounded to one known partition in that case.  Falling
+            # back to scan_parquet_root() turns a harmless date mismatch into
+            # a whole-history aggregate over high-volume minute/tick data.
+            prior = [p for p in partitions if p.end <= trade_date]
+            current = prior[-1] if prior else None
         if current is not None:
             partition_value = current.value
             prior = [p for p in partitions if p.start < current.start]

@@ -117,6 +117,27 @@ def test_audit_row_count_mutation_detects_daily_bars_drop(tmp_path):
     assert mutation[0]["previous_rows"] == 100
 
 
+def test_audit_uses_latest_completed_partition_when_run_date_has_no_partition(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    previous = date(2024, 6, 27)
+    latest = date(2024, 6, 28)
+    audit_date = date(2024, 6, 29)
+
+    _write_daily_bars_partition(cfg, previous, ["600519.SH"])
+    _write_daily_bars_partition(cfg, latest, ["600520.SH"])
+
+    findings = audit_curated_dataset(
+        "daily_bars",
+        "trade_date",
+        cfg.curated_root / "daily_bars",
+        audit_date,
+    )
+
+    row_count = [f for f in findings if f.get("check") == "row_count"]
+    assert row_count and row_count[0]["partition_value"] == latest.isoformat()
+    assert row_count[0]["message"].startswith("1 rows")
+
+
 def test_audit_flags_mock_rows_in_trade_date_partition(tmp_path):
     cfg = Config(data_root=tmp_path / "data")
     trade_date = date(2024, 6, 28)
