@@ -85,6 +85,29 @@ def test_positive_status_wins_over_old_negative_evidence():
     assert result.expected_no_data == []
 
 
+def test_daily_bar_ownership_rejects_source_empty_evidence():
+    session = date(2024, 6, 28)
+
+    result = classify_daily_bar_ownership(
+        ["600001.SH"],
+        {"600001.SH": (date(2000, 1, 1), None, "stock")},
+        session,
+        session,
+        negative_evidence=[
+            {
+                "symbol": "600001.SH",
+                "window_start": session.isoformat(),
+                "window_end": session.isoformat(),
+                "reason": "source_empty",
+                "source": "sina",
+            }
+        ],
+    )
+
+    assert result.generic == ["600001.SH"]
+    assert result.expected_no_data == []
+
+
 def test_negative_evidence_is_ttl_bounded_and_catalog_revision_invalidates(tmp_path):
     store = StateStore(tmp_path / "meta")
     now = datetime(2024, 6, 28, tzinfo=timezone.utc)

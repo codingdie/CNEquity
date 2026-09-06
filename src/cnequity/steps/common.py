@@ -792,7 +792,13 @@ def negative_evidence_covers(
     start: date,
     end: date,
 ) -> bool:
-    """Whether one persisted claim covers the complete requested window."""
+    """Whether one persisted claim covers the complete requested window.
+
+    A vendor's empty response is diagnostic, not a no-data proof.  Older lakes
+    may retain those observations, but they must never suppress a retry.
+    """
+    if entry.get("reason") == "source_empty":
+        return False
     if str(entry.get("symbol", "")).strip().upper() != str(symbol).strip().upper():
         return False
     try:

@@ -36,6 +36,7 @@ from cnequity.steps.common import (
     load_curated_trading_status,
     load_negative_evidence,
     load_symbols,
+    negative_evidence_covers,
     record_negative_evidence,
 )
 
@@ -774,7 +775,7 @@ def _record_daily_negative_observations(
     reason: str,
     source: str,
 ) -> None:
-    """Write source-empty observations after the final missing-key split."""
+    """Write independently verified no-data observations after the missing-key split."""
     if symbols:
         record_negative_evidence(
             config,
@@ -965,6 +966,14 @@ def _finish_daily_bars(
         partial_symbols = _staged_daily_bar_partial_symbols(
             config, run_id, all_expected_symbols, start, end
         )
+        status_gaps = _staged_daily_bar_missing_keys(
+            config, run_id, all_expected_symbols, start, end, include_non_trading=True
+        ) - _staged_daily_bar_missing_keys(config, run_id, all_expected_symbols, start, end)
+        if status_gaps:
+            terminal = _confirm_non_trading_daily_gaps(config, run_id, status_gaps)
+            rows_read += terminal["rows_read"]
+            rows_written += terminal["rows_written"]
+            findings.extend(terminal["audit_findings"])
         failed_set = set(failed_symbols) | fallback_failed_symbols
         if failed_set:
             gap = _gapfill_multiday_via_kline(
@@ -1392,6 +1401,8 @@ def _staged_daily_bar_missing_keys(
     symbols: list[str],
     start: date,
     end: date,
+    *,
+    include_non_trading: bool = False,
 ) -> set[tuple[str, date]]:
     """Return missing session keys for symbols that have partial evidence."""
     if start >= end or not symbols:
@@ -1450,13 +1461,74 @@ def _staged_daily_bar_missing_keys(
             (row["symbol"], day)
             for day in expected - set(row["dates"])
             if day not in pre_trading
-            and status_by_symbol.get(row["symbol"], {}).get(day) is not False
+            and (
+                include_non_trading or status_by_symbol.get(row["symbol"], {}).get(day) is not False
+            )
         )
     # A symbol with no rows at all is handled by the explicit no-data/unknown
     # classifier.  This helper is specifically the interior partial-evidence
     # gate and must not turn a whole-symbol empty response into a duplicate
     # error path.
     return {key for key in missing if key[0] in observed_symbols}
+
+
+def _confirm_non_trading_daily_gaps(
+    config: Config,
+    run_id: str,
+    missing_keys: set[tuple[str, date]],
+) -> dict:
+    # 状态过滤与最终校验必须使用同一凭据；单日空响应不能扩大为整个回看窗口为空。
+    evidence = load_negative_evidence(config, "daily_bars")
+    confirmed = {
+        (symbol, day)
+        for symbol, day in missing_keys
+        if any(negative_evidence_covers(item, symbol, day, day) for item in evidence)
+    }
+    pending = missing_keys - confirmed
+    rows_read = rows_written = 0
+    findings: list[dict] = []
+    unresolved: set[tuple[str, date]] = set()
+    for day in sorted({day for _symbol, day in pending}):
+        symbols = sorted(symbol for symbol, session in pending if session == day)
+        gap = _gapfill_multiday_via_kline(config, run_id, symbols=symbols, start=day, end=day)
+        rows_read += int(gap.get("rows_read", 0))
+        rows_written += int(gap.get("rows_written", 0))
+        findings.extend(gap.get("audit_findings") or [])
+        missing = set(symbols) - _staged_daily_bar_symbols(config, run_id, day)
+        if missing and config.sources.get("sina", True):
+            sina = fetch_bars_via_sina(
+                config,
+                sorted(missing),
+                day,
+                day,
+                run_id,
+                batch_prefix=f"sina-status-gapfill-{day}",
+                only_missing_keys={(symbol, day) for symbol in missing},
+            )
+            rows_read += int(sina.get("rows_read", 0))
+            rows_written += int(sina.get("rows_written", 0))
+            findings.extend((sina.get("context_updates") or {}).get("audit_findings") or [])
+        unresolved.update(
+            (symbol, day) for symbol in missing - _staged_daily_bar_symbols(config, run_id, day)
+        )
+    if unresolved:
+        _mark_unresolved_daily_bar_batches(
+            config,
+            run_id,
+            {symbol for symbol, _day in unresolved},
+            start=min(day for _symbol, day in unresolved),
+            end=max(day for _symbol, day in unresolved),
+        )
+        preview = ", ".join(f"{symbol}@{day}" for symbol, day in sorted(unresolved)[:8])
+        raise RuntimeError(
+            f"daily_bars: {len(unresolved)} non-trading status key(s) remain unknown after "
+            f"EastMoney/Sina confirmation; refusing to checkpoint: {preview}"
+        )
+    return {
+        "rows_read": rows_read,
+        "rows_written": rows_written,
+        "audit_findings": findings,
+    }
 
 
 def _gapfill_tip_via_sina(

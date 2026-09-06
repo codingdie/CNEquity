@@ -967,6 +967,140 @@ def test_multiday_sina_empty_does_not_advance_coverage(tmp_path, monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    "outcome", ["eastmoney_rows", "sina_rows", "empty", "error", "disabled", "cached_empty"]
+)
+def test_multiday_non_trading_tip_requires_terminal_evidence(tmp_path, monkeypatch, outcome):
+    from cnequity.steps.common import load_negative_evidence, record_negative_evidence
+
+    cfg = _cfg(tmp_path)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("daily:core")
+    start, end = date(2024, 6, 20), date(2024, 6, 21)
+    symbols = ["000016.SZ", "002731.SZ", "002870.SZ", "002998.SZ"]
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx", _bar_frame(symbols, start)
+    )
+    manifest.start_batch(run_id, "tdx", "daily_bars", "daily_bars", symbols=symbols)
+    manifest.finish_batch(run_id, "tdx", "success", rows_written=4)
+    status_root = cfg.curated_root / "trading_status"
+    status_root.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": symbols * 2,
+            "trade_date": [start] * 4 + [end] * 4,
+            "is_trading": [True] * 4 + [False] * 4,
+            "status": ["normal"] * 6 + ["suspended"] * 2,
+        }
+    ).write_parquet(status_root / "part.parquet")
+    if outcome == "cached_empty":
+        record_negative_evidence(
+            cfg,
+            "daily_bars",
+            symbols,
+            end,
+            end,
+            reason="source_empty",
+            source="sina",
+        )
+    calls = []
+
+    def eastmoney(requested, s, e, **kwargs):
+        calls.append(("eastmoney", tuple(requested), s, e))
+        assert s == e == end
+        return _bar_frame(requested, end) if outcome == "eastmoney_rows" else pl.DataFrame()
+
+    def sina(symbol, *, start, end, **kwargs):
+        calls.append(("sina", symbol, start, end))
+        assert start == end == date(2024, 6, 21)
+        if outcome == "error":
+            raise RuntimeError("source unavailable")
+        return _bar_frame([symbol], end) if outcome == "sina_rows" else pl.DataFrame()
+
+    monkeypatch.setattr("cnequity.adapters.eastmoney.bars.fetch_daily_bars", eastmoney)
+    monkeypatch.setattr("cnequity.adapters.sina.bars.fetch_daily_bars_sina", sina)
+    cfg.sources["sina"] = outcome != "disabled"
+
+    def finish():
+        return _finish_daily_bars(
+            cfg,
+            end,
+            run_id,
+            start=start,
+            end=end,
+            expected_tdx_symbols=symbols,
+            tdx_result={"rows_read": 4, "rows_written": 4},
+            sina_result=None,
+        )
+
+    if outcome in {"empty", "error", "disabled", "cached_empty"}:
+        with pytest.raises(RuntimeError, match="non-trading status key.*remain unknown"):
+            finish()
+        assert manifest.get_batch(run_id, "tdx")["status"] != "success"
+        evidence = load_negative_evidence(cfg, "daily_bars")
+        if outcome == "cached_empty":
+            assert {item["reason"] for item in evidence} == {"source_empty"}
+        else:
+            assert evidence == []
+    else:
+        result = finish()
+        assert result["rows_written"] == 8
+        assert _staged_daily_bar_symbols(cfg, run_id, start) == set(symbols)
+        assert _staged_daily_bar_symbols(cfg, run_id, end) == set(symbols)
+        assert load_negative_evidence(cfg, "daily_bars") == []
+    assert calls[0] == ("eastmoney", tuple(symbols), end, end)
+    assert sum(call[0] == "sina" for call in calls) == (
+        0 if outcome in {"eastmoney_rows", "disabled"} else 4
+    )
+
+
+def test_non_trading_interior_empty_remains_unresolved_with_failed_tip(tmp_path, monkeypatch):
+    from cnequity.steps.common import load_negative_evidence
+
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("daily:core")
+    start, middle, end = date(2024, 6, 19), date(2024, 6, 20), date(2024, 6, 21)
+    symbol = "000016.SZ"
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx", _bar_frame([symbol], start)
+    )
+    root = cfg.curated_root / "trading_status"
+    root.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": [symbol] * 3,
+            "trade_date": [start, middle, end],
+            "is_trading": [True, False, False],
+        }
+    ).write_parquet(root / "part.parquet")
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.bars.fetch_daily_bars", lambda *a, **k: pl.DataFrame()
+    )
+    calls = []
+
+    def sina(symbol, *, start, end, **kwargs):
+        calls.append((start, end))
+        assert start == end
+        if start == middle:
+            return pl.DataFrame()
+        raise RuntimeError("tip request failed")
+
+    monkeypatch.setattr("cnequity.adapters.sina.bars.fetch_daily_bars_sina", sina)
+    with pytest.raises(RuntimeError, match="000016.SZ@2024-06-21"):
+        _finish_daily_bars(
+            cfg,
+            end,
+            run_id,
+            start=start,
+            end=end,
+            expected_tdx_symbols=[symbol],
+            tdx_result={"rows_read": 1, "rows_written": 1},
+            sina_result=None,
+        )
+    assert calls == [(middle, middle), (end, end)]
+    assert load_negative_evidence(cfg, "daily_bars") == []
+
+
 def test_resolve_recovered_daily_batches_does_not_close_unrelated_failures(tmp_path):
     cfg = _cfg(tmp_path)
     manifest = Manifest(cfg.manifest_path)
