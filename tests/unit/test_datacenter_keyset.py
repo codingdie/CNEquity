@@ -165,6 +165,44 @@ def test_a_shard_that_is_all_one_key_raises_rather_than_looping():
         _fetch(client, keyset_column="SECUCODE")
 
 
+
+def test_equality_recovery_keeps_the_keyset_column():
+    """The recursive fetch used to drop keyset_column, so a boundary-key shard
+    that itself crossed the page cap failed with 'pass keyset_column' instead
+    of continuing (observed on RPT_F10_EH_FREEHOLDERS, 2026-09-06)."""
+
+    class _SawEquality(Exception):
+        pass
+
+    import cnequity.adapters.eastmoney.datacenter as dc
+
+    original_fetch = dc.fetch_datacenter
+    captured = {}
+
+    def spy_fetch(client, report, columns, **kwargs):
+        if kwargs.get("keyset_column") == "SECUCODE" and "SECUCODE='" in kwargs.get("filter_expr", ""):
+            captured["keyset"] = kwargs.get("keyset_column")
+            raise _SawEquality()
+        return original_fetch(client, report, columns, **kwargs)
+
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    monkeypatch.setattr(dc, "fetch_datacenter", spy_fetch)
+    try:
+        with __import__("pytest").raises(_SawEquality):
+            _fetch(FakeDatacenter(_table(symbols=250)), keyset_column="SECUCODE")
+    finally:
+        monkeypatch.undo()
+    assert captured.get("keyset") == "SECUCODE", "equality recovery lost keyset_column"
+
+
+def test_a_shard_entirely_one_key_fails_loudly_instead_of_recurring():
+    """A shard where every row shares one key cannot advance via strict or
+    equality recovery; the fetch must fail loudly instead of recursing."""
+    client = FakeDatacenter([{"SECUCODE": "S000", "HOLDER_RANK": i} for i in range(2000)])
+    with pytest.raises(EastMoneyDatacenterError, match=r"cannot re-anchor"):
+        _fetch(client, keyset_column="SECUCODE")
+
+
 def test_a_genuine_busy_answer_below_the_cap_is_still_reported_as_busy():
     """The cap fix must not swallow real throttling."""
 
