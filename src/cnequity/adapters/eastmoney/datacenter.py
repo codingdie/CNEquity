@@ -462,6 +462,16 @@ def fetch_datacenter(
                     f"{columns!r}"
                 )
             trailing = _keyset_trailing_count(rows, keyset_column, next_bound)
+            if trailing and trailing == shard_rows:
+                # Every row in the shard carries the same key.  A strict
+                # continuation cannot advance past it and an equality recovery
+                # would re-fetch the same page forever, so fail loudly instead
+                # of looping.  The key is too coarse for this report's size.
+                raise EastMoneyDatacenterError(
+                    f"EastMoney datacenter {report} cannot re-anchor: the whole "
+                    f"{_MAX_PAGE_NUMBER}-page shard shares {keyset_column}={next_bound!r}; "
+                    "the key is too coarse for this report"
+                )
             if trailing:
                 # A strict ``>`` continuation cannot see the remainder of a
                 # key group that straddled the cap.  Retrieve that group using
@@ -480,6 +490,7 @@ def fetch_datacenter(
                     page_size=page_size,
                     sort_columns=sort_columns,
                     sort_types=sort_types,
+                    keyset_column=keyset_column,
                     max_retries=max_retries,
                     retry_backoff_seconds=retry_backoff_seconds,
                     trust_page_size=trust_page_size,
