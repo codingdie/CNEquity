@@ -160,6 +160,8 @@ def _fetch_filtered(
     filter_expr: str,
     *,
     config: Config | None,
+    page_size: int = 500,
+    trust_page_size: bool = False,
 ) -> list[dict]:
     rate_limit_if_unconfigured(client, config)
     return fetch_datacenter(
@@ -167,6 +169,8 @@ def _fetch_filtered(
         report,
         columns,
         filter_expr=filter_expr,
+        page_size=page_size,
+        trust_page_size=trust_page_size,
         # Ascending by the keyset column is a precondition of re-anchoring.
         sort_columns=_KEYSET_COLUMN,
         sort_types="1",
@@ -394,6 +398,8 @@ def fetch_top_holders(
             _FREEHOLDERS_COLUMNS,
             _range_filter("END_DATE", start, end),
             config=config,
+            page_size=2500,
+            trust_page_size=True,
         )
         total_raw = _fetch_filtered(
             client,
@@ -401,6 +407,8 @@ def fetch_top_holders(
             _HOLDERS_COLUMNS,
             _range_filter("END_DATE", start, end),
             config=config,
+            page_size=2500,
+            trust_page_size=True,
         )
         free_raw = _rows_in_date_window(free_raw, "END_DATE", start, end)
         total_raw = _rows_in_date_window(total_raw, "END_DATE", start, end)

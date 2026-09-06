@@ -330,3 +330,22 @@ def test_registered_with_pit_and_the_rank_in_the_key():
     assert "holder_rank" in PRIMARY_KEYS["top_holders"]
     assert "holder_name" in PRIMARY_KEYS["top_holders"]
     assert "holder_scope" in PRIMARY_KEYS["top_holders"]
+
+
+def test_top_holders_uses_large_trusted_pages_for_both_reports(monkeypatch):
+    """FREEHOLDERS/HOLDERS exceed 100 pages at page_size=500 and EastMoney
+    ignores keyset filters (measured 2026-09-07), so the holder reports are
+    fetched with a larger trusted page size to stay under the page-number cap."""
+    calls: list[tuple[str, dict]] = []
+
+    def _fake(client, report, columns, **kwargs):
+        calls.append((report, kwargs))
+        return []
+
+    monkeypatch.setattr(sh, "fetch_datacenter", _fake)
+    sh.fetch_top_holders(WIN_START, WIN_END, client=_Client())
+    by_report = {report: kwargs for report, kwargs in calls}
+    for report in (sh._FREEHOLDERS_REPORT, sh._HOLDERS_REPORT):
+        kwargs = by_report[report]
+        assert kwargs.get("page_size") == 2500
+        assert kwargs.get("trust_page_size") is True
