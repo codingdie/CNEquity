@@ -110,6 +110,28 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  # 代理是独立可安装包；单独安装测试才能守住不依赖主包代码的边界。
+  query-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: proxy/pyproject.toml
+
+      - name: Install proxy
+        working-directory: proxy
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . --group dev
+
+      - name: Test proxy
+        working-directory: proxy
+        run: pytest tests -q
+
   # Windows is a first-class runtime target (file locks, path forms, wheels).
   # One Python version is enough to catch platform regressions; Ubuntu covers
   # the minimum supported and current stable interpreters. Network tests stay
