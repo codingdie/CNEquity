@@ -933,6 +933,17 @@ def test_multiday_sina_empty_does_not_advance_coverage(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path)
     run_id = Manifest(cfg.manifest_path).start_run("backfill")
     start, end = date(2024, 6, 20), date(2024, 6, 28)
+    symbol = "600519.SH"
+    instruments = cfg.curated_root / "instruments"
+    instruments.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": [symbol],
+            "asset_type": ["stock"],
+            "list_date": [date(2001, 8, 27)],
+            "delist_date": [None],
+        }
+    ).write_parquet(instruments / "part-merged.parquet")
 
     monkeypatch.setattr(
         "cnequity.steps.bars.fetch_bars_via_sina",
@@ -940,8 +951,8 @@ def test_multiday_sina_empty_does_not_advance_coverage(tmp_path, monkeypatch):
             "rows_read": 0,
             "rows_written": 0,
             "failed_symbols": 1,
-            "failed_symbol_names": ["561833.SH"],
-            "empty_symbol_names": ["561833.SH"],
+            "failed_symbol_names": [symbol],
+            "empty_symbol_names": [symbol],
         },
     )
     monkeypatch.setattr(
@@ -956,15 +967,90 @@ def test_multiday_sina_empty_does_not_advance_coverage(tmp_path, monkeypatch):
             run_id,
             start=start,
             end=end,
-            expected_tdx_symbols=["561833.SH"],
+            expected_tdx_symbols=[symbol],
             tdx_result={
                 "rows_read": 0,
                 "rows_written": 0,
                 "had_error": True,
-                "failed_symbols": ["561833.SH"],
+                "failed_symbols": [symbol],
             },
             sina_result=None,
         )
+
+
+def test_multiday_etf_sina_empty_allows_compact_with_source_unavailable_finding(
+    tmp_path, monkeypatch
+):
+    from cnequity.orchestrator.compact_gate import compact_allowed
+    from cnequity.steps.common import load_negative_evidence
+
+    cfg = _cfg(tmp_path)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("daily:core")
+    start, end = date(2024, 6, 20), date(2024, 6, 28)
+    symbol = "561833.SH"
+    instruments = cfg.curated_root / "instruments"
+    instruments.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": [symbol],
+            "asset_type": ["etf"],
+            "list_date": [date(2020, 1, 1)],
+            "delist_date": [None],
+        }
+    ).write_parquet(instruments / "part-merged.parquet")
+    manifest.start_batch(
+        run_id,
+        "tdx-failed",
+        task_id="daily_bars",
+        dataset="daily_bars",
+        symbols=[symbol],
+        window_start=start.isoformat(),
+        window_end=end.isoformat(),
+    )
+    manifest.finish_batch(run_id, "tdx-failed", "failed", error_message="TDX empty")
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.bars.fetch_daily_bars", lambda *args, **kwargs: pl.DataFrame()
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda *args, **kwargs: {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbols": 1,
+            "failed_symbol_names": [symbol],
+            "empty_symbol_names": [symbol],
+        },
+    )
+
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=[symbol],
+        tdx_result={
+            "rows_read": 0,
+            "rows_written": 0,
+            "had_error": True,
+            "failed_symbols": [symbol],
+        },
+        sina_result=None,
+    )
+
+    assert result["status"] == "warning"
+    finding = next(
+        item
+        for item in result["context_updates"]["audit_findings"]
+        if item["check"] == "daily_bars_source_unavailable"
+    )
+    assert finding["symbols"] == [symbol]
+    assert finding["source"] == "sina"
+    assert _staged_daily_bar_symbols(cfg, run_id, None) == set()
+    assert manifest.get_batch(run_id, "tdx-failed")["status"] == "success"
+    assert compact_allowed(manifest, run_id, "daily_bars") == (True, 0)
+    assert load_negative_evidence(cfg, "daily_bars") == []
 
 
 @pytest.mark.parametrize(

@@ -104,19 +104,27 @@ def _suspended_pairs(
         return pl.DataFrame(schema={"symbol": pl.Utf8, "trade_date": pl.Date})
 
     inst = dedupe_by_primary_key(
-        scan_parquet_root(inst_root, hive=False)
-        .select(["symbol", "list_date", "delist_date"])
-        .collect(),
+        scan_parquet_root(inst_root, hive=False).collect(),
         "instruments",
     )
+    if "asset_type" not in inst.columns:
+        inst = inst.with_columns(pl.lit(None, dtype=pl.Utf8).alias("asset_type"))
+    inst = inst.select(["symbol", "list_date", "delist_date", "asset_type"])
 
-    active = inst.join(sym_range, on="symbol", how="inner").with_columns(
-        pl.max_horizontal(pl.col("list_date").fill_null(pl.col("bmin")), pl.col("bmin")).alias(
-            "astart"
-        ),
-        pl.min_horizontal(pl.col("delist_date").fill_null(pl.col("bmax")), pl.col("bmax")).alias(
-            "aend"
-        ),
+    # An ETF/LOF source-unavailable gap says nothing about whether the fund was
+    # suspended. Only instruments outside that explicit class participate in
+    # bar-gap-derived suspension history; unknown types remain conservative.
+    active = (
+        inst.filter(pl.col("asset_type").ne("etf").fill_null(True))
+        .join(sym_range, on="symbol", how="inner")
+        .with_columns(
+            pl.max_horizontal(pl.col("list_date").fill_null(pl.col("bmin")), pl.col("bmin")).alias(
+                "astart"
+            ),
+            pl.min_horizontal(
+                pl.col("delist_date").fill_null(pl.col("bmax")), pl.col("bmax")
+            ).alias("aend"),
+        )
     )
     if start is not None:
         active = active.with_columns(

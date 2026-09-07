@@ -57,7 +57,7 @@
 | 频率 | 每日增量；init 时全量回填；深历史由同花顺按上市年份回补（股票与 ETF/LOF 均支持） |
 | 主键 | (symbol, trade_date) |
 | 重拉 | 当日 `corporate_actions` 的除权日对应标的 |
-| 已知限制 | TDX 限速；建议 workers ≤ 8；clist 只有当日快照，须用 run 的 `trade_date` 打戳（ADR-0005 routing）；ETF/LOF 无上市日期时按未上市占位符处理，不盲抓深历史 |
+| 已知限制 | TDX 限速；建议 workers ≤ 8；clist 只有当日快照，须用 run 的 `trade_date` 打戳（ADR-0005 routing）；ETF/LOF 无上市日期时按未上市占位符处理，不盲抓深历史。对 instruments 已分类为 `asset_type=etf` 的标的，TDX→EastMoney→Sina 均无覆盖且 Sina 成功返回空响应时，记录 `daily_bars_source_unavailable` warning 并允许已到达的 core 数据 compact；不伪造 bar、不写 no-data 缓存、不派生停牌。股票和未知类型仍严格阻塞（ADR-0008） |
 
 #### index_bars
 

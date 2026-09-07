@@ -101,6 +101,30 @@ def _instrument_spans(
     }
 
 
+def _etf_symbols(config: Config, symbols: set[str]) -> set[str]:
+    """Return only instruments explicitly classified as exchange-traded funds.
+
+    ``asset_type='etf'`` is the canonical classification for both ETF and LOF.
+    Missing or unknown metadata intentionally remains outside this exception so
+    an incomplete instrument catalog cannot weaken daily-bar coverage.
+    """
+    requested = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+    if not requested:
+        return set()
+    metadata = instrument_metadata(config)
+    if metadata.is_empty():
+        return set()
+    return {
+        str(row["symbol"]).strip().upper()
+        for row in metadata.filter(
+            pl.col("symbol").is_in(sorted(requested)) & (pl.col("asset_type") == "etf")
+        )
+        .select("symbol")
+        .iter_rows(named=True)
+        if str(row["symbol"]).strip()
+    }
+
+
 def _classify_daily_scope(
     config: Config,
     symbols: list[str],
@@ -1020,6 +1044,9 @@ def _finish_daily_bars(
     # batches stale so the normal retry path will fetch the exact window again;
     # otherwise a raised step would leave successful receipts that
     # ``retry_failed_only`` is allowed to skip.
+    sina_empty_etf_symbols: set[str] = set()
+    source_unavailable_symbols: set[str] = set()
+    source_unavailable_pairs: set[tuple[str, date]] = set()
     if not tip and (expected_tdx_symbols or expected_fallback_symbols):
         all_expected_symbols = list(
             dict.fromkeys((expected_tdx_symbols or []) + (expected_fallback_symbols or []))
@@ -1051,23 +1078,44 @@ def _finish_daily_bars(
             rows_written += int(sina.get("rows_written", 0))
             findings.extend((sina.get("context_updates") or {}).get("audit_findings") or [])
             sina_empty_symbols = set(sina.get("empty_symbol_names") or [])
-            if sina_empty_symbols:
+            sina_empty_etf_symbols = _etf_symbols(config, sina_empty_symbols)
+            unresolved_sina_empty = sina_empty_symbols - sina_empty_etf_symbols
+            if unresolved_sina_empty:
                 findings.append(
                     {
                         "dataset": "daily_bars",
                         "severity": "warning",
                         "check": "daily_bars_sina_empty_response",
                         "message": (
-                            f"Sina returned no bars for {len(sina_empty_symbols)} symbol(s) over "
-                            f"{start}..{end} after TDX/EastMoney coverage was incomplete; "
-                            "the keys remain unresolved without independent no-data evidence"
+                            f"Sina returned no bars for {len(unresolved_sina_empty)} non-ETF or "
+                            f"unclassified symbol(s) over {start}..{end} after TDX/EastMoney "
+                            "coverage was incomplete; the keys remain unresolved"
                         ),
-                        "symbols": sorted(sina_empty_symbols),
+                        "symbols": sorted(unresolved_sina_empty),
                     }
                 )
             missing_pairs = _staged_daily_bar_missing_keys(
                 config, run_id, all_expected_symbols, start, end
             )
+        source_unavailable_pairs = {
+            (symbol, session)
+            for symbol, session in missing_pairs
+            if symbol in sina_empty_etf_symbols
+        }
+        if source_unavailable_pairs:
+            source_unavailable_symbols.update(
+                symbol for symbol, _session in source_unavailable_pairs
+            )
+            _resolve_recovered_daily_batches(
+                config,
+                run_id,
+                resolved_symbols=source_unavailable_symbols,
+                resolution=(
+                    "Sina returned a successful empty response for an ETF/LOF after "
+                    "TDX/EastMoney gap-fill"
+                ),
+            )
+            missing_pairs -= source_unavailable_pairs
         if missing_pairs:
             missing_symbols = {symbol for symbol, _day in missing_pairs}
             finding = {
@@ -1185,6 +1233,20 @@ def _finish_daily_bars(
         staged = _staged_daily_bar_symbols(config, run_id, end)
         missing_staged = set(all_expected_symbols) - staged
         if missing_staged:
+            source_unavailable_full_symbols = missing_staged & sina_empty_etf_symbols
+            if source_unavailable_full_symbols:
+                source_unavailable_symbols.update(source_unavailable_full_symbols)
+                _resolve_recovered_daily_batches(
+                    config,
+                    run_id,
+                    resolved_symbols=source_unavailable_symbols,
+                    resolution=(
+                        "Sina returned a successful empty response for an ETF/LOF after "
+                        "TDX/EastMoney gap-fill"
+                    ),
+                )
+                missing_staged -= source_unavailable_full_symbols
+        if missing_staged:
             certified, unknown, ownership = _certify_missing_daily_symbols(
                 config,
                 missing_staged,
@@ -1246,7 +1308,35 @@ def _finish_daily_bars(
                     f"snapshot: {key_preview}{suffix}"
                 )
 
+    if source_unavailable_symbols:
+        findings.append(
+            {
+                "dataset": "daily_bars",
+                "severity": "warning",
+                "check": "daily_bars_source_unavailable",
+                "message": (
+                    f"Sina returned a successful empty response for "
+                    f"{len(source_unavailable_symbols)} ETF/LOF symbol(s) over "
+                    f"{start}..{end} after TDX/EastMoney returned no coverage; their "
+                    "missing keys were not materialized or classified as suspensions"
+                ),
+                "source": "sina",
+                "asset_type": "etf",
+                "source_limited": True,
+                "symbols": sorted(source_unavailable_symbols),
+                "interior_missing_keys": len(source_unavailable_pairs),
+                "sample_keys": [
+                    {"symbol": symbol, "trade_date": session.isoformat()}
+                    for symbol, session in sorted(source_unavailable_pairs)[:8]
+                ],
+            }
+        )
+
     result: dict = {"rows_read": rows_read, "rows_written": rows_written}
+    if source_unavailable_symbols:
+        # The rows were not recovered; the core data that did arrive may still
+        # compact, while the run records the explicit source limitation.
+        result["status"] = "warning"
     metrics = dict(tdx_result.get("metrics") or {})
     # The fallback scope is known even when its upstream call returns no
     # rows. Recording requested fallback work is more useful than inferring
@@ -1265,7 +1355,11 @@ def _finish_daily_bars(
 
 
 def _resolve_recovered_daily_batches(
-    config: Config, run_id: str, *, resolved_symbols: set[str]
+    config: Config,
+    run_id: str,
+    *,
+    resolved_symbols: set[str],
+    resolution: str = "resolved by Sina/EastMoney gap-fill or verified expected no-data",
 ) -> None:
     """Unblock only worker attempts whose failed symbols were verified downstream."""
     from cnequity.orchestrator.manifest import Manifest
@@ -1280,7 +1374,7 @@ def _resolve_recovered_daily_batches(
         manifest.resolve_failed_batch(
             run_id,
             batch["batch_id"],
-            error_message="resolved by Sina/EastMoney gap-fill or verified expected no-data",
+            error_message=resolution,
         )
 
 
@@ -2094,7 +2188,12 @@ def fetch_bars_via_sina(
     requested_symbols = list(dict.fromkeys(symbols))
     fetch = fetch or (
         lambda symbol, client: fetch_daily_bars_sina(
-            symbol, start=start, end=end, client=client, config=config
+            symbol,
+            start=start,
+            end=end,
+            client=client,
+            config=config,
+            require_confirmed_empty=True,
         )
     )
     frames: list[pl.DataFrame] = []

@@ -114,6 +114,26 @@ def test_fetch_skips_nonpositive_price_rows(monkeypatch):
     assert sina.fetch_daily_bars_sina("600519.SH").is_empty()
 
 
+def test_strict_empty_rejects_malformed_rows(monkeypatch):
+    monkeypatch.setattr(
+        sina,
+        "_request",
+        lambda symbol, datalen, client: [
+            {
+                "day": "2024-01-02",
+                "open": "0",
+                "high": "0",
+                "low": "0",
+                "close": "0",
+                "volume": "100",
+            }
+        ],
+    )
+
+    with pytest.raises(sina.SinaBarsError, match="cannot certify an empty result"):
+        sina.fetch_daily_bars_sina("600519.SH", require_confirmed_empty=True)
+
+
 def test_fetch_dedupes_source_rows_by_trade_date(monkeypatch):
     monkeypatch.setattr(
         sina,

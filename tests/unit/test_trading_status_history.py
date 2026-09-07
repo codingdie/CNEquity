@@ -304,6 +304,65 @@ def test_derive_suspension_from_bar_gaps(tmp_path):
     assert susp["source"][0] == "derived_bar_gap"
 
 
+def test_derive_suspension_excludes_etf_bar_gaps(tmp_path):
+    root = tmp_path / "data"
+    cfg = Config(data_root=root)
+    days = [date(2024, 6, 26), date(2024, 6, 27), date(2024, 6, 28)]
+
+    def bar(current: date) -> dict:
+        return {
+            "symbol": "561833.SH",
+            "trade_date": current,
+            "open": 1.0,
+            "high": 1.0,
+            "low": 1.0,
+            "close": 1.0,
+            "volume": 1,
+            "amount": 1.0,
+            "source": "tdx_protocol",
+            "data_version": "v1",
+            "fetched_at": "2024-06-28T00:00:00+00:00",
+        }
+
+    for current in days:
+        _write(
+            root,
+            "trading_calendar",
+            "trade_date",
+            current.isoformat(),
+            pl.DataFrame(
+                {
+                    "trade_date": [current],
+                    "is_trading": [True],
+                    "source": ["seed"],
+                    "data_version": ["v1"],
+                    "fetched_at": ["2024-06-28T00:00:00+00:00"],
+                }
+            ),
+        )
+        if current != date(2024, 6, 27):
+            _write(
+                root,
+                "daily_bars",
+                "trade_date",
+                current.isoformat(),
+                pl.DataFrame([bar(current)]),
+            )
+
+    instruments = root / "curated" / "instruments"
+    instruments.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["561833.SH"],
+            "asset_type": ["etf"],
+            "list_date": [date(2020, 1, 1)],
+            "delist_date": [None],
+        }
+    ).write_parquet(instruments / "part-merged.parquet")
+
+    assert derive_suspension_history(cfg, "run-etf-gap") == 0
+
+
 def test_derive_suspension_treats_zero_volume_placeholder_as_missing(tmp_path):
     root = tmp_path / "data"
     cfg = Config(data_root=root)

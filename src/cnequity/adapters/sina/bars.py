@@ -223,12 +223,18 @@ def fetch_daily_bars_sina(
     datalen: int = _FULL_HISTORY_LEN,
     client: httpx.Client | None = None,
     config=None,
+    require_confirmed_empty: bool = False,
 ) -> pl.DataFrame:
     """Unadjusted daily bars for *symbol*, in the curated ``daily_bars`` shape.
 
     Returns an empty frame (not an error) for a code Sina has never heard of —
     sweeping the code space depends on being able to tell "never issued" from
     "request failed", and a transport failure still raises.
+
+    ``require_confirmed_empty`` is for a caller that may relax a coverage gate
+    only after a trustworthy no-row response. A non-empty payload with malformed
+    rows must not become that proof merely because normalization filters every
+    row in the requested date range.
     """
     if config is None:
         rows = _request(symbol, datalen, client)
@@ -239,6 +245,7 @@ def fetch_daily_bars_sina(
     rows = _without_synthetic_terminal_copies(rows)
 
     out: list[dict] = []
+    malformed_rows = 0
     for item in rows:
         try:
             trade_date = date.fromisoformat(str(item["day"])[:10])
@@ -266,6 +273,7 @@ def fetch_daily_bars_sina(
                 }
             )
         except (KeyError, TypeError, ValueError):
+            malformed_rows += 1
             logger.warning("Sina kline: skipping malformed row for %s: %r", symbol, item)
             continue
 
@@ -274,4 +282,9 @@ def fetch_daily_bars_sina(
         df = df.filter(pl.col("trade_date") >= start)
     if end is not None:
         df = df.filter(pl.col("trade_date") <= end)
+    if require_confirmed_empty and df.is_empty() and malformed_rows:
+        raise SinaBarsError(
+            f"Sina kline response for {symbol} contained {malformed_rows} malformed row(s); "
+            "cannot certify an empty result"
+        )
     return df.unique(subset=["symbol", "trade_date"], keep="last").sort("trade_date")
