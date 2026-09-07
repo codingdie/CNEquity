@@ -7,6 +7,7 @@
 {CNEQUITY_PROXY_DATA_ROOT}/curated/daily_bars/trade_date=YYYY-MM-DD/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/minute_bars/trade_date=YYYY-MM-DD/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/minute_bars_5m/trade_date=YYYY-MM-DD/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/trading_status/trade_date=YYYY-MM/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/instruments/part-merged.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/derived/adj_factors/trade_date=YYYY-MM-DD/*.parquet
 ```
@@ -19,9 +20,9 @@
 - 所有日期使用 ISO 8601 格式：`YYYY-MM-DD`。
 - `symbol` 使用 6 位代码和交易所后缀：`600519.SH`、`000001.SZ`、`430047.BJ`。大小写不敏感，
   响应统一使用大写。
-- K 线与复权因子按时间正序返回；证券列表按 `symbol` 升序返回。`cursor` 是上一页的
+- K 线、复权因子与交易状态按时间正序返回；证券列表按 `symbol` 升序返回。`cursor` 是上一页的
   `next_cursor`；将它原样传回即可读取后续数据。
-- `1d`、`1w`、`1mo` 省略 `start` 和 `end` 时，结束日为服务端当天，开始日为结束日前
+- `1d`、`1w`、`1mo` 与交易状态省略 `start` 和 `end` 时，结束日为服务端当天，开始日为结束日前
   `CNEQUITY_PROXY_DEFAULT_WINDOW_DAYS` 个自然日，默认 365 天；单次窗口受
   `CNEQUITY_PROXY_MAX_WINDOW_DAYS` 限制，默认 3660 天。
 - `1m` 默认窗口为 `CNEQUITY_PROXY_DEFAULT_MINUTE_WINDOW_DAYS`（默认 5 天），最大为
@@ -55,6 +56,7 @@ Authorization: Bearer <CNEQUITY_PROXY_API_KEY>
 | --- | --- | --- |
 | `GET /healthz` | 否 | 服务存活探针 |
 | `GET /v1/instruments` | 是（配置 Key 时） | 查询证券基础信息与代码 |
+| `GET /v1/trading-status/{symbol}` | 是（配置 Key 时） | 查询证券每日交易状态与风险警示 |
 | `GET /v1/kline/{symbol}` | 是（配置 Key 时） | 查询原始、前复权或后复权的日、日内、周、月 K |
 | `GET /v1/adjustment-factors/{symbol}` | 是（配置 Key 时） | 查询前复权或后复权因子 |
 
@@ -124,6 +126,67 @@ curl -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
     }
   ],
   "as_of": "2025-01-31",
+  "next_cursor": null
+}
+```
+
+## 交易状态
+
+### `GET /v1/trading-status/{symbol}`
+
+查询证券在本地数据湖中已有的每日交易状态。服务只读取与窗口重叠的
+`curated/trading_status/trade_date=YYYY-MM/*.parquet` 月分区，不读取证券主数据或主项目的
+任何运行时组件。
+
+| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `symbol` | path | string | 是 | - | 股票或北交所代码，见通用约定 |
+| `start` | query | date | 否 | 动态窗口 | 闭区间开始日 |
+| `end` | query | date | 否 | 当天 | 闭区间结束日 |
+| `cursor` | query | date | 否 | - | 上一页的 `next_cursor`，不得早于 `start` |
+| `status` | query | `normal` / `suspended` / `delisted` | 否 | - | 精确匹配交易状态，大小写不敏感 |
+| `is_trading` | query | boolean | 否 | - | 精确匹配数据湖记录的当日可交易标记 |
+| `risk_warning` | query | boolean | 否 | - | 精确匹配 ST/*ST 风险警示标记；不会匹配 `null` |
+| `limit` | query | integer | 否 | 1000 | 每页状态记录数，范围 1 到运行配置的上限 |
+
+每条 `statuses` 记录包含：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `trade_date` | date | 状态所对应的交易日 |
+| `is_trading` | boolean | 数据湖记录的该日是否可交易 |
+| `status` | `normal` / `suspended` / `delisted` | 交易状态；风险警示不编码在这个字段中 |
+| `risk_warning` | boolean / null | 是否带 ST/*ST 风险警示；`null` 表示数据湖没有该事实的证据 |
+
+`status` 与 `risk_warning` 是正交事实。例如，`status=suspended` 且 `risk_warning=true` 表示风险
+警示证券当日停牌。筛选 `risk_warning=false` 时只返回显式为 `false` 的记录，`null` 不会被当作
+`false`。
+
+没有状态记录不代表 `normal`，而是该日期没有可用的状态事实。调用方若需要构造完整证券池，
+应先明确自己的缺失值处理规则，不能由本接口凭空补全为可交易。
+
+查询风险警示停牌记录：
+
+```bash
+curl -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
+  "https://proxy.example/v1/trading-status/600519.SH?start=2025-01-01&end=2025-01-31&status=suspended&risk_warning=true"
+```
+
+成功响应示例：
+
+```json
+{
+  "symbol": "600519.SH",
+  "start": "2025-01-01",
+  "end": "2025-01-31",
+  "statuses": [
+    {
+      "trade_date": "2025-01-16",
+      "is_trading": false,
+      "status": "suspended",
+      "risk_warning": true
+    }
+  ],
   "next_cursor": null
 }
 ```
@@ -320,7 +383,7 @@ curl -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
 ## 分页
 
 当响应中的 `next_cursor` 非 `null` 时，传入该值请求下一页，并保持原有筛选条件不变。`1d`、
-`1w`、`1mo` K 与因子接口的游标是日期；`1m`、`5m` K 的游标是 `bar_time`，即无时区
+`1w`、`1mo` K、复权因子与交易状态接口的游标是日期；`1m`、`5m` K 的游标是 `bar_time`，即无时区
 `Asia/Shanghai` ISO 8601 时间戳；证券接口的游标是 `symbol`。例如：
 
 ```text
@@ -333,6 +396,11 @@ GET /v1/kline/600519.SH?interval=5m&start=2025-01-05&end=2025-01-05&limit=500
 -> next_cursor = 2025-01-05T10:15:00
 
 GET /v1/kline/600519.SH?interval=5m&start=2025-01-05&end=2025-01-05&limit=500&cursor=2025-01-05T10:15:00
+
+GET /v1/trading-status/600519.SH?start=2025-01-01&end=2025-12-31&status=suspended&limit=500
+-> next_cursor = 2025-06-30
+
+GET /v1/trading-status/600519.SH?start=2025-01-01&end=2025-12-31&status=suspended&limit=500&cursor=2025-06-30
 ```
 
 ## 错误响应
@@ -354,10 +422,10 @@ GET /v1/kline/600519.SH?interval=5m&start=2025-01-05&end=2025-01-05&limit=500&cu
 
 ## 数据与性能边界
 
-- 日 K、周/月聚合、日内 K 与复权因子均先按 `trade_date=` 目录剪裁文件；证券主数据只打开固定 canonical 文件，均不递归扫描整个数据湖。
+- 日 K、周/月聚合、日内 K、复权因子与交易状态均先按 `trade_date=` 目录剪裁文件；交易状态按月分区，其他时序数据按日分区。证券主数据只打开固定 canonical 文件，均不递归扫描整个数据湖。
 - `1m` 与 `5m` 分别使用独立的短窗口上限和数据目录；周/月聚合复用日 K 的窗口及文件预算，并在 DuckDB 内以单次扫描完成逐日复权和聚合。
 - SQL 只读取接口需要的列，且使用参数化查询。
-- 全部 K 线、复权因子与证券主数据共享未命中缓存的并发扫描额度，避免并发请求拖慢采集任务。
+- 全部 K 线、复权因子、交易状态与证券主数据共享未命中缓存的并发扫描额度，避免并发请求拖慢采集任务。
 - 查询结果和分区索引均使用进程内 TTL 缓存；代理绝不向数据湖写入缓存或其他文件。
 
 ## 接口变更维护

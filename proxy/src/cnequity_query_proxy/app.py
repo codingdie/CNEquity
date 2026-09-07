@@ -6,7 +6,7 @@ import hmac
 import re
 import threading
 from datetime import date, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -26,9 +26,11 @@ from cnequity_query_proxy.kline import (
 from cnequity_query_proxy.minute_kline import MinuteKlineService
 from cnequity_query_proxy.period_kline import PeriodKlineService
 from cnequity_query_proxy.settings import ProxySettings
+from cnequity_query_proxy.trading_status import TradingState, TradingStatusService
 
 _SYMBOL = re.compile(r"^[0-9A-Z]{6}\.(?:SH|SZ|BJ)$")
 _ASSET_TYPE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_TRADING_STATES = frozenset({"normal", "suspended", "delisted"})
 _PUBLIC_PATHS = frozenset({"/healthz", "/docs", "/docs/oauth2-redirect", "/openapi.json", "/redoc"})
 
 
@@ -224,6 +226,31 @@ class InstrumentPageResponse(BaseModel):
     )
 
 
+class TradingStatusRecordResponse(BaseModel):
+    """一只证券在一个交易日的状态。"""
+
+    trade_date: date
+    is_trading: bool = Field(description="数据湖记录的当日是否可交易。")
+    status: str = Field(description="交易状态，当前契约为 normal、suspended 或 delisted。")
+    risk_warning: bool | None = Field(
+        default=None,
+        description="是否有 ST/*ST 风险警示；null 表示数据湖没有该事实的证据。",
+    )
+
+
+class TradingStatusPageResponse(BaseModel):
+    """按交易日正序返回的一页交易状态。"""
+
+    symbol: str
+    start: date
+    end: date
+    statuses: list[TradingStatusRecordResponse]
+    next_cursor: date | None = Field(
+        default=None,
+        description="下一页传回 cursor；null 表示当前窗口已读完。",
+    )
+
+
 def _normalize_symbol(value: str, *, parameter: str = "symbol") -> str:
     symbol = value.upper()
     if not _SYMBOL.fullmatch(symbol):
@@ -250,6 +277,15 @@ def _normalize_asset_type(value: str | None) -> str | None:
     if not _ASSET_TYPE.fullmatch(asset_type):
         raise HTTPException(422, "asset_type 只能包含小写字母、数字和下划线")
     return asset_type
+
+
+def _normalize_trading_state(value: str | None) -> TradingState | None:
+    if value is None:
+        return None
+    state = value.strip().lower()
+    if state not in _TRADING_STATES:
+        raise HTTPException(422, "status 必须是 normal、suspended 或 delisted")
+    return cast(TradingState, state)
 
 
 def _normalize_query(value: str | None) -> str | None:
@@ -328,6 +364,7 @@ def create_app(settings: ProxySettings) -> FastAPI:
     service = KlineService(settings, slots=query_slots)
     factor_service = AdjustmentFactorService(settings, slots=query_slots)
     instrument_service = InstrumentService(settings, slots=query_slots)
+    trading_status_service = TradingStatusService(settings, slots=query_slots)
     minute_kline_service = MinuteKlineService(settings, interval="1m", slots=query_slots)
     five_minute_kline_service = MinuteKlineService(settings, interval="5m", slots=query_slots)
     weekly_kline_service = PeriodKlineService(settings, interval="1w", slots=query_slots)
@@ -336,6 +373,7 @@ def create_app(settings: ProxySettings) -> FastAPI:
     app.state.kline_service = service
     app.state.adjustment_factor_service = factor_service
     app.state.instrument_service = instrument_service
+    app.state.trading_status_service = trading_status_service
     app.state.minute_kline_service = minute_kline_service
     app.state.five_minute_kline_service = five_minute_kline_service
     app.state.weekly_kline_service = weekly_kline_service
@@ -408,6 +446,64 @@ def create_app(settings: ProxySettings) -> FastAPI:
                 InstrumentResponse(**instrument.__dict__) for instrument in page.instruments
             ],
             as_of=as_of,
+            next_cursor=page.next_cursor,
+        )
+
+    @app.get(
+        "/v1/trading-status/{symbol}",
+        response_model=TradingStatusPageResponse,
+    )
+    def trading_status(
+        symbol: str,
+        response: Response,
+        start: date | None = None,
+        end: date | None = None,
+        cursor: date | None = None,
+        status: str | None = None,
+        is_trading: bool | None = None,
+        risk_warning: bool | None = None,
+        limit: Annotated[int | None, Query(ge=1)] = None,
+    ) -> TradingStatusPageResponse:
+        normalized_symbol = _normalize_symbol(symbol)
+        normalized_status = _normalize_trading_state(status)
+        resolved_start, resolved_end = _resolve_window(settings, start=start, end=end)
+        resolved_limit = limit if limit is not None else settings.default_limit
+        if resolved_limit > settings.max_bars:
+            raise HTTPException(422, f"limit 不能超过 {settings.max_bars}")
+        if cursor is not None and cursor < resolved_start:
+            raise HTTPException(422, "cursor 不能早于 start")
+
+        try:
+            page, cache_hit = trading_status_service.query(
+                symbol=normalized_symbol,
+                start=resolved_start,
+                end=resolved_end,
+                limit=resolved_limit,
+                cursor=cursor,
+                status=normalized_status,
+                is_trading=is_trading,
+                risk_warning=risk_warning,
+            )
+        except QueryBusy as exc:
+            raise HTTPException(429, str(exc), headers={"Retry-After": "1"}) from exc
+        except QueryTooWide as exc:
+            raise HTTPException(413, str(exc)) from exc
+        except LakeUnavailable as exc:
+            raise HTTPException(503, "交易状态数据湖暂不可用") from exc
+        except QueryFailed as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+        response.headers["X-Cache"] = "HIT" if cache_hit else "MISS"
+        response.headers["Cache-Control"] = (
+            "no-store"
+            if settings.cache_ttl_seconds == 0
+            else f"private, max-age={int(settings.cache_ttl_seconds)}"
+        )
+        return TradingStatusPageResponse(
+            symbol=normalized_symbol,
+            start=resolved_start,
+            end=resolved_end,
+            statuses=[TradingStatusRecordResponse(**item.__dict__) for item in page.statuses],
             next_cursor=page.next_cursor,
         )
 

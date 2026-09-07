@@ -101,6 +101,31 @@ def write_minute_bars(
         connection.close()
 
 
+def write_trading_status(root: Path, partition: date, rows: list[tuple]) -> None:
+    target = root / "curated" / "trading_status" / f"trade_date={partition.strftime('%Y-%m')}"
+    target.mkdir(parents=True, exist_ok=True)
+    connection = duckdb.connect(":memory:")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE trading_status (
+                symbol VARCHAR,
+                trade_date DATE,
+                is_trading BOOLEAN,
+                status VARCHAR,
+                risk_warning BOOLEAN
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO trading_status VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        _copy_table(connection, "trading_status", target / "part-merged.parquet")
+    finally:
+        connection.close()
+
+
 def write_instruments(root: Path, rows: list[tuple]) -> None:
     target = root / "curated" / "instruments"
     target.mkdir(parents=True, exist_ok=True)
@@ -153,6 +178,16 @@ def lake_root(tmp_path: Path) -> Path:
     write_factor(tmp_path, date(2026, 1, 2), [("600519.SH", date(2026, 1, 2), "hfq", 2)])
     write_factor(tmp_path, date(2026, 1, 5), [("600519.SH", date(2026, 1, 5), "hfq", 4)])
     write_factor(tmp_path, date(2026, 1, 6), [("600519.SH", date(2026, 1, 6), "hfq", 4)])
+    write_trading_status(
+        tmp_path,
+        date(2026, 1, 1),
+        [
+            ("600519.SH", date(2026, 1, 2), True, "normal", False),
+            ("000001.SZ", date(2026, 1, 2), True, "normal", True),
+            ("600519.SH", date(2026, 1, 5), False, "suspended", True),
+            ("600519.SH", date(2026, 1, 6), False, "delisted", None),
+        ],
+    )
     write_minute_bars(
         tmp_path,
         date(2026, 1, 2),

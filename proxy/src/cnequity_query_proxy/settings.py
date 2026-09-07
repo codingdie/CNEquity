@@ -95,6 +95,10 @@ class ProxySettings:
     def minute_bars_5m_root(self) -> Path:
         return self.data_root / "curated" / "minute_bars_5m"
 
+    @property
+    def trading_status_root(self) -> Path:
+        return self.data_root / "curated" / "trading_status"
+
     def intraday_bars_root(self, interval: Literal["1m", "5m"]) -> Path:
         """返回指定日内周期独立的 Parquet 根目录。"""
         if interval == "1m":

@@ -7,13 +7,14 @@ DuckDB 或元数据；与主项目唯一的接口是本地 Parquet 文件布局�
 {CNEQUITY_PROXY_DATA_ROOT}/curated/daily_bars/trade_date=YYYY-MM-DD/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/minute_bars/trade_date=YYYY-MM-DD/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/minute_bars_5m/trade_date=YYYY-MM-DD/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/trading_status/trade_date=YYYY-MM/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/instruments/part-merged.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/derived/adj_factors/trade_date=YYYY-MM-DD/*.parquet
 ```
 
-当前提供证券基础信息、`1d`、`1m`、`5m`、`1w`、`1mo` K 线与复权因子查询。周/月线由本地
-日 K 聚合，`1m` 和 `5m` 读取各自独立的日内 Parquet 目录；它不会抓取上游数据、不会写入数据湖，
-也不会修改任何现有文件。
+当前提供证券基础信息、每日交易状态、`1d`、`1m`、`5m`、`1w`、`1mo` K 线与复权因子查询。
+周/月线由本地日 K 聚合，`1m` 和 `5m` 读取各自独立的日内 Parquet 目录，交易状态读取独立的月
+分区目录；它不会抓取上游数据、不会写入数据湖，也不会修改任何现有文件。
 
 ## 安装与启动
 
@@ -35,12 +36,12 @@ cnequity-query-proxy
 
 ## 性能与运行边界
 
-- 先按 `trade_date=` 分区目录选择日 K、日内 K 和复权因子文件；证券主数据只打开固定 canonical 文件，避免全湖递归 glob。
+- 先按 `trade_date=` 分区目录选择日 K、日内 K、复权因子和交易状态文件；交易状态按月分区，证券主数据只打开固定 canonical 文件，避免全湖递归 glob。
 - SQL 只投影接口所需列，并将 symbol、日期、名称搜索和页大小过滤推给 DuckDB。
 - 日/周/月默认单次窗口最多 3660 天；`1m` 默认最多 31 天、`5m` 默认最多 90 天，均可用环境变量调整。单次最多打开 6000 个 Parquet 文件。
 - 周/月线先逐日复权再聚合；日内线不在请求期内从另一个频率重采样，避免额外扫描和语义偏差。
 - 进程内 LRU 缓存默认保存 15 秒，分区目录索引也以相同 TTL 刷新；这使日更后最多短暂延迟，不会向数据湖写缓存文件。
-- 默认最多 4 个未命中查询同时扫描；超过时立即返回 `429`，避免突发请求拖慢本地磁盘和采集任务。
+- 默认最多 4 个未命中查询同时扫描；全部 K 线、因子、证券与交易状态接口共享这个额度，超过时立即返回 `429`，避免突发请求拖慢本地磁盘和采集任务。
 
 可配置环境变量：
 
