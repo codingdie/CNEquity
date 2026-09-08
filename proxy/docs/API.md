@@ -83,6 +83,7 @@ Authorization: Bearer <CNEQUITY_PROXY_API_KEY>
 | `GET /v1/trading-status/{symbol}` | 是（配置 Key 时） | 查询证券每日交易状态与风险警示 |
 | `GET /v1/stocks/{symbol}/summary` | 是（配置 Key 时） | 查询单只证券的轻量当前摘要 |
 | `GET /v1/dragon-tiger/batch` | 是（配置 Key 时） | 流式下载全市场原始龙虎榜 Parquet |
+| `GET /v1/valuation-metrics/batch` | 是（配置 Key 时） | 流式下载全市场原始估值指标 Parquet |
 | `GET /v1/sector-members/batch` | 是（配置 Key 时） | 流式下载原始板块成分历史快照 Parquet |
 | `GET /v1/kline/batch` | 是（配置 Key 时） | 流式下载全市场原始日线 Parquet |
 | `GET /v1/kline/{symbol}` | 是（配置 Key 时） | 查询原始、前复权或后复权的日、日内、周、月 K |
@@ -702,6 +703,44 @@ GET /v1/trading-status/600519.SH?start=2025-01-01&end=2025-12-31&status=suspende
 3. 运行代理测试。`test_api_documentation.py` 会校验路由清单、接口章节及全部 path/query
    参数名与实际业务路由完全一致；未同步文档将导致测试失败。
 
+
+## 估值指标历史批量下载
+
+### `GET /v1/valuation-metrics/batch`
+
+下载已有 `curated/valuation_metrics/trade_date=YYYY-MM-DD/*.parquet` 原始文件，
+适合批量获取全市场流通市值、总市值及估值历史。日期按 `trade_date` 分区选择，包含起止日；
+查某个最新交易日时，`start` 与 `end` 传同一天，不会自动寻找或替换为其他日期。
+
+| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `start` | query | date | 是 | - | YYYY-MM-DD，闭区间开始日 |
+| `end` | query | date | 是 | - | YYYY-MM-DD，闭区间结束日 |
+
+响应沿用日线批量接口：`application/x-tar`，归档路径相对数据湖根目录，文件名为
+`cnequity-valuation-metrics-{start}-{end}.tar`。保留原始 Parquet 字节及全部现有字段，
+包括 `float_mv`、`total_mv`（单位：元）、`pe_ttm`、`pb`、`ps_ttm`、`source`、
+`data_version`、`trade_date` 和 `fetched_at`；不投影、不重编码、不补值，缺失市值仍为空。
+已有跨日采集记录的日期与采集时间原样返回，本接口不修正两者，也不触发采集或写湖。
+归档仅代表已有数据，不保证窗口内全市场证券或字段齐全。
+
+鉴权、错误处理及文件预算与现有批量接口一致：配置 API Key 时要求 Bearer Token；
+参数缺失、日期格式/日期值无效或 start 晚于 end 返回 422；窗口无文件返回 404；
+数据集目录不可用或准备文件失败返回 503。批量下载不使用普通查询的 `max_files`、
+窗口天数及并发额度；保留受控文件路径检查和流式读取。
+响应含 `X-CNEQUITY-Data-Files`、`X-CNEQUITY-Data-Bytes`、
+`Cache-Control: no-store` 和 `X-Cache: BYPASS`。
+
+```http
+GET /v1/valuation-metrics/batch?start=2026-09-07&end=2026-09-07
+Authorization: Bearer <API_KEY>
+```
+
+```bash
+curl -L -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
+  "https://proxy.example/v1/valuation-metrics/batch?start=2026-09-07&end=2026-09-07" \
+  --output cnequity-valuation-metrics-2026-09-07.tar
+```
 
 ## 板块成分历史批量下载
 

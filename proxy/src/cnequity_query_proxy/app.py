@@ -547,6 +547,13 @@ def create_app(settings: ProxySettings) -> FastAPI:
         dataset_name="dragon_tiger",
         data_label="龙虎榜",
     )
+    valuation_metrics_batch_service = ParquetBatchService(
+        settings,
+        root=settings.valuation_metrics_root,
+        dataset_name="valuation_metrics",
+        data_label="估值指标",
+    )
+    app.state.valuation_metrics_batch_service = valuation_metrics_batch_service
     sector_members_batch_service = ParquetBatchService(
         settings,
         root=settings.sector_members_root,
@@ -846,6 +853,33 @@ def create_app(settings: ProxySettings) -> FastAPI:
             end=end,
             filename_prefix="cnequity-dragon-tiger",
             unavailable_detail="龙虎榜数据湖暂不可用",
+        )
+
+    @app.get(
+        "/v1/valuation-metrics/batch",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "content": {"application/x-tar": {}},
+                "description": "原始全市场估值指标 Parquet 的流式 TAR 归档。",
+            }
+        },
+    )
+    def valuation_metrics_batch(
+        start: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        end: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    ) -> StreamingResponse:
+        """原样下载估值历史，保留空市值、trade_date 和 fetched_at。"""
+        try:
+            start_date, end_date = date.fromisoformat(start), date.fromisoformat(end)
+        except ValueError as exc:
+            raise HTTPException(422, "日期必须是有效的 YYYY-MM-DD") from exc
+        return batch_archive_response(
+            valuation_metrics_batch_service,
+            start=start_date,
+            end=end_date,
+            filename_prefix="cnequity-valuation-metrics",
+            unavailable_detail="估值指标数据湖暂不可用",
         )
 
     @app.get(
