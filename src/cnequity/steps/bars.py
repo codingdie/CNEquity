@@ -1329,6 +1329,16 @@ def _finish_daily_bars(
                     "unknown after failover; refusing to checkpoint a partial market "
                     f"snapshot: {key_preview}{suffix}"
                 )
+        if all_expected_symbols:
+            # A worker batch can mix symbols resolved by different proofs,
+            # such as an ETF source-empty response and a delisted stock
+            # outside the window. Resolve only after every missing symbol has
+            # passed one of the gates above.
+            _resolve_recovered_daily_batches(
+                config,
+                run_id,
+                resolved_symbols=set(all_expected_symbols),
+            )
 
     if source_unavailable_symbols:
         findings.append(

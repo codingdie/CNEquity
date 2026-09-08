@@ -1053,6 +1053,70 @@ def test_multiday_etf_sina_empty_allows_compact_with_source_unavailable_finding(
     assert load_negative_evidence(cfg, "daily_bars") == []
 
 
+def test_multiday_mixed_etf_empty_and_delisted_batch_allows_compact(tmp_path, monkeypatch):
+    from cnequity.orchestrator.compact_gate import compact_allowed
+
+    cfg = _cfg(tmp_path)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("daily:core")
+    start, end = date(2024, 6, 20), date(2024, 6, 28)
+    etf, delisted = "561833.SH", "601313.SH"
+    instruments = cfg.curated_root / "instruments"
+    instruments.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": [etf, delisted],
+            "asset_type": ["etf", "stock"],
+            "list_date": [date(2020, 1, 1), date(2016, 1, 4)],
+            "delist_date": [None, date(2018, 2, 14)],
+        }
+    ).write_parquet(instruments / "part-merged.parquet")
+    manifest.start_batch(
+        run_id,
+        "tdx-failed",
+        task_id="daily_bars",
+        dataset="daily_bars",
+        symbols=[etf, delisted],
+        window_start=start.isoformat(),
+        window_end=end.isoformat(),
+    )
+    manifest.finish_batch(run_id, "tdx-failed", "failed", error_message="TDX empty")
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
+        lambda *args, **kwargs: pl.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "cnequity.steps.bars.fetch_bars_via_sina",
+        lambda *args, **kwargs: {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbols": 1,
+            "failed_symbol_names": [etf],
+            "empty_symbol_names": [etf],
+        },
+    )
+
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=[etf, delisted],
+        tdx_result={
+            "rows_read": 0,
+            "rows_written": 0,
+            "had_error": True,
+            "failed_symbols": [etf, delisted],
+        },
+        sina_result=None,
+    )
+
+    assert result["status"] == "warning"
+    assert manifest.get_batch(run_id, "tdx-failed")["status"] == "success"
+    assert compact_allowed(manifest, run_id, "daily_bars") == (True, 0)
+
+
 @pytest.mark.parametrize(
     "outcome",
     ["eastmoney_rows", "sina_rows", "sina_empty", "error", "disabled", "cached_empty"],
