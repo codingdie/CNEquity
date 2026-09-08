@@ -1411,10 +1411,11 @@ def test_multiday_partial_gap_uses_sina_after_eastmoney(tmp_path, monkeypatch):
     assert result["rows_written"] == 3
 
 
-def test_multiday_etf_partial_history_confirms_exact_empty_key(tmp_path, monkeypatch):
+def test_multiday_etf_partial_history_confirms_trailing_empty_key(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path)
     run_id = Manifest(cfg.manifest_path).start_run("daily:core")
-    start, missing_day, end = date(2024, 6, 20), date(2024, 6, 21), date(2024, 6, 24)
+    start, middle, end = date(2024, 6, 20), date(2024, 6, 21), date(2024, 6, 24)
+    missing_day = end
     symbol = "160105.SZ"
     instruments = cfg.curated_root / "instruments"
     instruments.mkdir(parents=True)
@@ -1430,7 +1431,7 @@ def test_multiday_etf_partial_history_confirms_exact_empty_key(tmp_path, monkeyp
         "daily_bars", run_id, "tdx-start", _bar_frame([symbol], start)
     )
     StagingWriter(cfg.staging_root).write_batch(
-        "daily_bars", run_id, "tdx-end", _bar_frame([symbol], end)
+        "daily_bars", run_id, "tdx-middle", _bar_frame([symbol], middle)
     )
     monkeypatch.setattr(
         "cnequity.adapters.eastmoney.bars.fetch_daily_bars",

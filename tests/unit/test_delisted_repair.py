@@ -7,6 +7,7 @@ import polars as pl
 
 from cnequity.config import Config
 from cnequity.domain.schemas import DAILY_BARS_SCHEMA
+from cnequity.steps.bars import _certify_missing_daily_symbols
 from cnequity.steps.common import classify_daily_bar_ownership
 from cnequity.steps.delisted import (
     _ingested_symbols,
@@ -155,6 +156,25 @@ def test_repair_retires_601313_and_removes_it_from_current_bar_obligations(tmp_p
         date(2026, 9, 8),
     )
     assert ownership.expected_no_data == ["601313.SH"]
+    assert ownership.no_data_reasons == {"601313.SH": "delisted_before_window"}
+
+
+def test_daily_certification_uses_delisted_catalog_when_instrument_date_is_missing(tmp_path):
+    cfg = _cfg(
+        tmp_path,
+        {"601313.SH": "2018-02-14"},
+        live=("601313.SH",),
+    )
+
+    certified, unknown, ownership = _certify_missing_daily_symbols(
+        cfg,
+        {"601313.SH"},
+        date(2026, 8, 31),
+        date(2026, 9, 7),
+    )
+
+    assert certified == {"601313.SH"}
+    assert unknown == set()
     assert ownership.no_data_reasons == {"601313.SH": "delisted_before_window"}
 
 

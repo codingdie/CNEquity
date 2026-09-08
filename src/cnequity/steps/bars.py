@@ -94,11 +94,21 @@ def _backfill_window(config: Config, trade_date: date) -> tuple[date, date]:
 
 def _instrument_spans(
     config: Config,
+    *,
+    include_delisted_catalog: bool = False,
 ) -> dict[str, tuple[date | None, date | None, str | None]]:
-    return {
+    spans = {
         row["symbol"]: (row["list_date"], row["delist_date"], row.get("asset_type"))
         for row in instrument_metadata(config).iter_rows(named=True)
     }
+    if include_delisted_catalog:
+        from cnequity.steps.delisted import load_delisted_catalog
+
+        for symbol, last_traded in load_delisted_catalog(config).items():
+            list_date, delist_date, asset_type = spans.get(symbol, (None, None, None))
+            if delist_date is None:
+                spans[symbol] = (list_date, last_traded, asset_type)
+    return spans
 
 
 def _etf_symbols(config: Config, symbols: set[str]) -> set[str]:
@@ -140,10 +150,7 @@ def _classify_daily_scope(
     final validator decides whether the run may be published.
     """
     metadata = instrument_metadata(config)
-    spans = {
-        row["symbol"]: (row["list_date"], row["delist_date"], row.get("asset_type"))
-        for row in metadata.iter_rows(named=True)
-    }
+    spans = _instrument_spans(config, include_delisted_catalog=True)
     sessions = list_trading_dates(config, start, end)
     status = load_curated_trading_status(
         config,
@@ -760,10 +767,7 @@ def _certify_missing_daily_symbols(
     if not requested:
         return set(), set(), DailyBarOwnership()
     metadata = instrument_metadata(config)
-    spans = {
-        row["symbol"]: (row["list_date"], row["delist_date"], row.get("asset_type"))
-        for row in metadata.iter_rows(named=True)
-    }
+    spans = _instrument_spans(config, include_delisted_catalog=True)
     status = load_curated_trading_status(
         config,
         start=start,
@@ -1247,7 +1251,11 @@ def _finish_daily_bars(
         missing_staged = set(all_expected_symbols) - staged
         missing_staged -= {symbol for symbol, session in verified_suspension_keys if session == end}
         if missing_staged:
-            source_unavailable_full_symbols = missing_staged & sina_empty_etf_symbols
+            source_unavailable_full_symbols = {
+                symbol
+                for symbol in missing_staged
+                if symbol in sina_empty_etf_symbols or (symbol, end) in source_unavailable_pairs
+            }
             if source_unavailable_full_symbols:
                 source_unavailable_symbols.update(source_unavailable_full_symbols)
                 _resolve_recovered_daily_batches(
