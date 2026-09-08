@@ -1411,6 +1411,67 @@ def test_multiday_partial_gap_uses_sina_after_eastmoney(tmp_path, monkeypatch):
     assert result["rows_written"] == 3
 
 
+def test_multiday_etf_partial_history_confirms_exact_empty_key(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    run_id = Manifest(cfg.manifest_path).start_run("daily:core")
+    start, missing_day, end = date(2024, 6, 20), date(2024, 6, 21), date(2024, 6, 24)
+    symbol = "160105.SZ"
+    instruments = cfg.curated_root / "instruments"
+    instruments.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": [symbol],
+            "asset_type": ["etf"],
+            "list_date": [date(2000, 1, 1)],
+            "delist_date": [None],
+        }
+    ).write_parquet(instruments / "part-merged.parquet")
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx-start", _bar_frame([symbol], start)
+    )
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx-end", _bar_frame([symbol], end)
+    )
+    monkeypatch.setattr(
+        "cnequity.adapters.eastmoney.bars.fetch_daily_bars",
+        lambda *args, **kwargs: pl.DataFrame(),
+    )
+
+    def _sina(config, symbols, s, e, target_run_id, **kwargs):
+        assert symbols == [symbol]
+        assert kwargs["only_missing_keys"] == {(symbol, missing_day)}
+        return {
+            "rows_read": 0,
+            "rows_written": 0,
+            "failed_symbols": 1,
+            "failed_symbol_names": [symbol],
+            "empty_symbol_names": [],
+            "confirmed_empty_keys": [(symbol, missing_day)],
+        }
+
+    monkeypatch.setattr("cnequity.steps.bars.fetch_bars_via_sina", _sina)
+
+    result = _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=[symbol],
+        tdx_result={"rows_read": 2, "rows_written": 2, "failed_symbols": []},
+        sina_result=None,
+    )
+
+    assert result["status"] == "warning"
+    finding = next(
+        item
+        for item in result["context_updates"]["audit_findings"]
+        if item["check"] == "daily_bars_source_unavailable"
+    )
+    assert finding["symbols"] == [symbol]
+    assert finding["interior_missing_keys"] == 1
+
+
 def test_multiday_partial_symbol_detects_leading_session_gap(tmp_path):
     cfg = _cfg(tmp_path)
     run_id = Manifest(cfg.manifest_path).start_run("backfill")

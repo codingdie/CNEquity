@@ -83,6 +83,46 @@ def test_fallback_bars_are_staged_with_their_own_provenance(tmp_path):
     assert staged["source"].unique().to_list() == ["sina"]
 
 
+def test_fallback_reports_confirmed_empty_target_keys_from_partial_history(tmp_path):
+    cfg = Config(data_root=tmp_path / "data", sources={"sina": True})
+    symbol = "160105.SZ"
+    first, missing = date(2026, 9, 3), date(2026, 9, 4)
+
+    result = fetch_bars_via_sina(
+        cfg,
+        [symbol],
+        first,
+        missing,
+        "run-partial-empty",
+        fetch=lambda s, c: _bars(s, [first]),
+        only_missing_keys={(symbol, missing)},
+    )
+
+    assert result["confirmed_empty_keys"] == [(symbol, missing)]
+    assert result["empty_symbol_names"] == []
+
+
+def test_fallback_failure_does_not_confirm_empty_target_keys(tmp_path):
+    cfg = Config(data_root=tmp_path / "data", sources={"sina": True})
+    symbol = "160105.SZ"
+    missing = date(2026, 9, 4)
+
+    def fail(_symbol, _client):
+        raise RuntimeError("bad payload")
+
+    result = fetch_bars_via_sina(
+        cfg,
+        [symbol],
+        missing,
+        missing,
+        "run-failed-empty",
+        fetch=fail,
+        only_missing_keys={(symbol, missing)},
+    )
+
+    assert result["confirmed_empty_keys"] == []
+
+
 def test_bse_is_primary_for_a_current_single_session(tmp_path, monkeypatch):
     cfg = Config(
         data_root=tmp_path / "data",

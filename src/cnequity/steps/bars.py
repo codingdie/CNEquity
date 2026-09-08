@@ -1047,6 +1047,8 @@ def _finish_daily_bars(
     # otherwise a raised step would leave successful receipts that
     # ``retry_failed_only`` is allowed to skip.
     sina_empty_etf_symbols: set[str] = set()
+    sina_confirmed_empty_keys: set[tuple[str, date]] = set()
+    sina_confirmed_empty_etf_symbols: set[str] = set()
     source_unavailable_symbols: set[str] = set()
     source_unavailable_pairs: set[tuple[str, date]] = set()
     if not tip and (expected_tdx_symbols or expected_fallback_symbols):
@@ -1080,7 +1082,12 @@ def _finish_daily_bars(
             rows_written += int(sina.get("rows_written", 0))
             findings.extend((sina.get("context_updates") or {}).get("audit_findings") or [])
             sina_empty_symbols = set(sina.get("empty_symbol_names") or [])
+            sina_confirmed_empty_keys = set(sina.get("confirmed_empty_keys") or [])
             sina_empty_etf_symbols = _etf_symbols(config, sina_empty_symbols)
+            sina_confirmed_empty_etf_symbols = _etf_symbols(
+                config,
+                {symbol for symbol, _day in sina_confirmed_empty_keys},
+            )
             unresolved_sina_empty = sina_empty_symbols - sina_empty_etf_symbols
             if unresolved_sina_empty:
                 findings.append(
@@ -1103,6 +1110,10 @@ def _finish_daily_bars(
             (symbol, session)
             for symbol, session in missing_pairs
             if symbol in sina_empty_etf_symbols
+            or (
+                (symbol, session) in sina_confirmed_empty_keys
+                and symbol in sina_confirmed_empty_etf_symbols
+            )
         }
         if source_unavailable_pairs:
             source_unavailable_symbols.update(
@@ -2244,6 +2255,7 @@ def fetch_bars_via_sina(
     frames: list[pl.DataFrame] = []
     failed: list[str] = []
     empty: list[str] = []
+    sina_confirmed_symbols: set[str] = set()
     covered_dates: dict[str, set[date]] = {}
     audit_findings: list[dict] = []
     rows = 0
@@ -2364,8 +2376,10 @@ def fetch_bars_via_sina(
         if failure_kind == "empty":
             empty.append(symbol)
             failed.append(symbol)
+            sina_confirmed_symbols.add(symbol)
             continue
         assert bars is not None
+        sina_confirmed_symbols.add(symbol)
         covered_dates[symbol] = set(bars["trade_date"].to_list())
         frames.append(bars)
 
@@ -2397,6 +2411,16 @@ def fetch_bars_via_sina(
         rows += int(out.get("rows_written", 0))
 
     result: dict = {"rows_read": rows, "rows_written": rows}
+    if only_missing_keys is not None:
+        # A successful Sina response may contain bars elsewhere in the window
+        # while omitting the exact sparse-fund sessions being reconciled. Keep
+        # that evidence at key granularity: symbol-level ``empty`` would lose
+        # the distinction, while a request/parse failure must certify nothing.
+        result["confirmed_empty_keys"] = sorted(
+            (symbol, day)
+            for symbol, day in only_missing_keys
+            if symbol in sina_confirmed_symbols and day not in covered_dates.get(symbol, set())
+        )
     audit_findings.extend(supplement_findings)
     if failed:
         result["failed_symbols"] = len(failed)
