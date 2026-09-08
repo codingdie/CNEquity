@@ -510,6 +510,7 @@ def create_app(settings: ProxySettings) -> FastAPI:
         title="CNEquity Query Proxy",
         version="0.1.0",
         description="Standalone, read-only HTTP API over local Parquet files.",
+        root_path=settings.root_path,
     )
     query_slots = threading.BoundedSemaphore(settings.max_concurrent_queries)
     service = KlineService(settings, slots=query_slots)

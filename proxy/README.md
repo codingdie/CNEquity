@@ -41,6 +41,11 @@ cnequity-query-proxy
 `CNEQUITY_PROXY_PORT` 覆盖。非回环地址启动时必须设置
 `CNEQUITY_PROXY_API_KEY`；业务请求通过 `Authorization: Bearer <token>` 鉴权。
 
+若由反向代理将外部路径前缀剥离后转发到 Proxy，设置与该前缀相同的
+`CNEQUITY_PROXY_ROOT_PATH`。例如将 `https://cnequity.codingdie.com/query/*` 重写到服务根路径时，
+设置 `CNEQUITY_PROXY_ROOT_PATH=/query`；这样 `/query/docs` 中的 OpenAPI 请求仍会指向
+`/query/openapi.json`。
+
 交互式接口文档位于 `http://127.0.0.1:8790/docs`，健康检查为 `/healthz`。
 参数、复权公式、分页、错误码和请求示例以 [完整 API 文档](docs/API.md) 为准；新增或变更
 接口时需要同步更新该文档，并由代理测试校验路由清单。
@@ -72,6 +77,7 @@ Python 调用方可安装独立的 [CNEquity Query SDK](../sdk/README.md)，通�
 | `CNEQUITY_PROXY_API_KEY` | 空 | Bearer Token；对外绑定时必填 |
 | `CNEQUITY_PROXY_HOST` | `127.0.0.1` | 监听地址 |
 | `CNEQUITY_PROXY_PORT` | `8790` | 监听端口 |
+| `CNEQUITY_PROXY_ROOT_PATH` | 空 | 反向代理剥离的外部路径前缀，例如 `/query` |
 | `CNEQUITY_PROXY_DEFAULT_WINDOW_DAYS` | `365` | 未给日期时的默认窗口 |
 | `CNEQUITY_PROXY_MAX_WINDOW_DAYS` | `3660` | 单次允许的最大日期跨度 |
 | `CNEQUITY_PROXY_DEFAULT_MINUTE_WINDOW_DAYS` | `5` | `1m` 未给日期时的默认窗口 |

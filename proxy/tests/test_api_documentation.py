@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
 
 from cnequity_query_proxy.app import create_app
 
@@ -59,3 +61,18 @@ def test_api_documentation_lists_exactly_the_public_business_routes(settings):
     }
 
     assert _documented_parameters(content) == actual_parameters
+
+
+def test_reverse_proxy_path_prefix_is_used_by_openapi_and_docs(settings):
+    client = TestClient(create_app(replace(settings, api_key="secret", root_path="/query")))
+
+    healthz = client.get("/healthz")
+    docs = client.get("/docs")
+    openapi = client.get("/openapi.json")
+
+    assert healthz.status_code == 200
+    assert docs.status_code == 200
+    assert "url: '/query/openapi.json'" in docs.text
+    assert openapi.status_code == 200
+    assert openapi.json()["servers"] == [{"url": "/query"}]
+    assert client.get("/v1/instruments").status_code == 401

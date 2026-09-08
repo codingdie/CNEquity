@@ -20,7 +20,7 @@ from datetime import date
 
 from cnequity_query_sdk import QueryClient
 
-with QueryClient("https://proxy.example", api_key="your-token") as client:
+with QueryClient("https://cnequity.codingdie.com/query", api_key="your-token") as client:
     summary = client.get_stock_summary("600519.SH")
     print(summary.instrument.name)
     print(summary.market.latest_market.close)
@@ -54,6 +54,9 @@ with QueryClient("https://proxy.example", api_key="your-token") as client:
 
 `summary.market.latest_market` 是最新可用的一条日级 OHLCV 行情快照，不是 K 线序列或实时
 盘口。日、日内、周和月 K 线应使用 `get_kline()` 或 `iter_kline()`。
+
+`base_url` 可以包含反向代理路径前缀；生产入口为
+`https://cnequity.codingdie.com/query`，不要省略末尾的 `/query`。
 
 ## 查询方法
 

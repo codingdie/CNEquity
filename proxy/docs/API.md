@@ -23,6 +23,13 @@
 生产环境请通过 HTTPS 反向代理公开服务。默认监听 `127.0.0.1:8790`，交互式 OpenAPI
 文档位于 `/docs`，机器可读规范位于 `/openapi.json`。
 
+若反向代理以路径前缀公开服务，并在转发前剥离该前缀，运行 Proxy 时必须设置
+`CNEQUITY_PROXY_ROOT_PATH`。当前部署使用
+`https://cnequity.codingdie.com/query`，因此设置 `CNEQUITY_PROXY_ROOT_PATH=/query`；文档地址为
+`https://cnequity.codingdie.com/query/docs`，机器可读规范为
+`https://cnequity.codingdie.com/query/openapi.json`。下文路由清单中的路径是 Proxy 收到的内部路径，
+对外访问时在其前加上 `/query`。
+
 Python 调用方可使用独立的 [CNEquity Query SDK](../../sdk/README.md)，获取与本文相同的类型化
 查询能力，而无需直接处理 JSON、分页游标或 HTTP 状态码。
 

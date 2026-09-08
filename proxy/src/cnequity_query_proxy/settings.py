@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -10,6 +11,9 @@ from typing import Literal
 
 class SettingsError(ValueError):
     """环境变量缺失或格式错误。"""
+
+
+_ROOT_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]*$")
 
 
 def _positive_int(name: str, default: int, *, minimum: int = 1, maximum: int = 1_000_000) -> int:
@@ -38,12 +42,39 @@ def _non_negative_float(name: str, default: float, *, maximum: float) -> float:
     return value
 
 
+def _validate_root_path(root_path: str) -> None:
+    """限制反向代理路径前缀为可安全嵌入 URL 的规范路径。"""
+    if not isinstance(root_path, str):
+        raise SettingsError("root_path 必须是字符串")
+    if not root_path:
+        return
+    if root_path != root_path.strip():
+        raise SettingsError("root_path 不能包含首尾空白")
+    if root_path == "/" or not root_path.startswith("/") or root_path.endswith("/"):
+        raise SettingsError("root_path 必须为空或以 / 开头且不带尾随 / 的路径")
+
+    segments = root_path[1:].split("/")
+    if any(
+        segment in {".", ".."} or not _ROOT_PATH_SEGMENT.fullmatch(segment) for segment in segments
+    ):
+        raise SettingsError("root_path 只能包含由字母、数字、点、连字符和下划线组成的路径段")
+
+
+def _root_path_from_env() -> str:
+    raw = os.getenv("CNEQUITY_PROXY_ROOT_PATH", "")
+    if not raw.strip():
+        return ""
+    _validate_root_path(raw)
+    return raw
+
+
 @dataclass(frozen=True)
 class ProxySettings:
     """查询代理的全部运行配置。"""
 
     data_root: Path
     api_key: str | None = None
+    root_path: str = ""
     default_window_days: int = 365
     max_window_days: int = 3660
     default_minute_window_days: int = 5
@@ -59,6 +90,7 @@ class ProxySettings:
     duckdb_threads: int = 1
 
     def __post_init__(self) -> None:
+        _validate_root_path(self.root_path)
         if self.default_window_days < 1 or self.max_window_days < self.default_window_days:
             raise SettingsError("默认窗口必须为正数且不大于最大窗口")
         if (
@@ -164,6 +196,7 @@ class ProxySettings:
         return cls(
             data_root=Path(raw_root).expanduser().resolve(),
             api_key=api_key,
+            root_path=_root_path_from_env(),
             default_window_days=_positive_int("CNEQUITY_PROXY_DEFAULT_WINDOW_DAYS", 365),
             max_window_days=_positive_int("CNEQUITY_PROXY_MAX_WINDOW_DAYS", 3660),
             default_minute_window_days=_positive_int(
