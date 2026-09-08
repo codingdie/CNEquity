@@ -24,6 +24,7 @@ from cnequity.domain.market_time import shanghai_today
 from cnequity.orchestrator.engine import JobEngine
 from cnequity.orchestrator.manifest import Manifest
 from cnequity.query.parquet_scan import scan_parquet_files
+from cnequity.storage.revisions import RevisionStore
 from cnequity.storage.source_snapshots import (
     DEFAULT_SNAPSHOT_RETENTION_DAYS,
     clean_source_snapshots,
@@ -268,7 +269,8 @@ def clean(
     Ready means: run is terminal (success/warning/failed), all batches settled,
     and a successful compact batch was recorded. Incomplete or never-compacted
     staging is kept for retry unless --force is given. Also prunes aged
-    ``meta/source_snapshots`` run_id dirs.
+    ``meta/source_snapshots`` run_id dirs and revision generations older than
+    the configured current + previous retention window.
     """
     cfg = _cfg(config_path)
     reconciled: dict[str, int] | None = None
@@ -294,6 +296,15 @@ def clean(
         retention_days=snapshot_retention_days,
         dry_run=dry_run,
     )
+    revisions = RevisionStore(
+        cfg.meta_root,
+        cfg.curated_root,
+        cfg.derived_root,
+    ).prune_all(
+        retain=cfg.revision_retained_generations,
+        dry_run=dry_run,
+    )
+    revision_bytes = sum(item.bytes_freed for item in revisions)
     click.echo(
         json.dumps(
             {
@@ -303,11 +314,17 @@ def clean(
                 "orphan_run_ids": result.orphan_run_ids,
                 "force_removed_run_ids": result.force_removed_run_ids,
                 "skipped_run_ids": result.skipped_run_ids,
-                "bytes_freed": result.bytes_freed + snaps.bytes_freed,
+                "bytes_freed": result.bytes_freed + snaps.bytes_freed + revision_bytes,
                 "source_snapshots": {
                     "removed_run_dirs": snaps.removed_run_dirs,
                     "kept_run_dirs": snaps.kept_run_dirs,
                     "bytes_freed": snaps.bytes_freed,
+                },
+                "revisions": {
+                    "retained_generations": cfg.revision_retained_generations,
+                    "removed_generations": sum(len(item.removed_generations) for item in revisions),
+                    "removed_receipts": sum(len(item.removed_receipts) for item in revisions),
+                    "bytes_freed": revision_bytes,
                 },
             },
             indent=2,

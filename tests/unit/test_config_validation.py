@@ -15,6 +15,23 @@ from cnequity.config import (
 from cnequity.config.bootstrap import path_for_toml
 
 
+def test_load_config_defaults_revision_retention_to_current_and_previous(tmp_path):
+    cfg_path = tmp_path / "test.toml"
+    cfg_path.write_text(f'[data]\nroot = "{path_for_toml(tmp_path / "data")}"\n')
+
+    assert load_config(cfg_path).revision_retained_generations == 2
+
+
+def test_validate_config_rejects_single_revision_generation(tmp_path):
+    cfg = Config(
+        data_root=tmp_path / "data",
+        revision_retained_generations=1,
+        daily_waves=[WaveConfig(name="core", parallel=True, steps=["instruments"])],
+    )
+
+    assert "[revisions].retained_generations must be >= 2" in validate_config(cfg)
+
+
 def test_validate_config_rejects_unknown_group_step(tmp_path):
     cfg = Config(
         data_root=tmp_path / "data",

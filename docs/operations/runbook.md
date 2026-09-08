@@ -167,6 +167,10 @@ cne run daily --group core   # 增量续采
 默认备份在湖内，磁盘级容灾请将 `CNE_BACKUP_DIR` 指到湖外。
 由其他备份系统覆盖元数据时，可设置 `CNE_BACKUP_META=0`，关闭 daily pipeline 的收尾备份。
 
+revision generation 默认只保留当前版和上一版（`[revisions].retained_generations = 2`）。
+每次发布新 revision 前会回收更早版本；`cne clean --dry-run` 可预览全湖 revision 清理，
+确认后运行 `cne clean` 执行。被回收的旧 revision 不能再用于 pinned query。
+
 需要冻结可复现实验所依赖的 Parquet 时，使用带校验和、revision receipt、契约指纹和
 运行 lineage 的可移植快照：
 

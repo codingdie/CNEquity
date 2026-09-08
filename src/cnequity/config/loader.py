@@ -204,6 +204,9 @@ class Config:
     raw_archive_datasets: list[str] = field(default_factory=list)
     raw_archive_compression: str = "gzip"
     raw_archive_max_payload_bytes: int | None = 32 * 1024 * 1024
+    # Complete immutable dataset generations retained per dataset. Two keeps
+    # the current and immediately previous roots available to lock-free readers.
+    revision_retained_generations: int = 2
     # How long a source-empty observation may suppress another expensive
     # per-symbol retry.  The evidence is still invalidated by instrument /
     # status identity changes; this TTL is only a bound on a quiet source.
@@ -601,6 +604,9 @@ def load_config(path: str | Path) -> Config:
     raw_archive_raw = raw.get("raw_archive", {})
     if not isinstance(raw_archive_raw, dict):
         raw_archive_raw = {}
+    revisions_raw = raw.get("revisions", {})
+    if not isinstance(revisions_raw, dict):
+        revisions_raw = {}
     failover_datasets: list[FailoverDatasetSpec] = []
     for item in failover_raw.get("datasets", []):
         failover_datasets.append(
@@ -652,6 +658,7 @@ def load_config(path: str | Path) -> Config:
             if raw_archive_raw.get("max_payload_bytes") is not None
             else None
         ),
+        revision_retained_generations=int(revisions_raw.get("retained_generations", 2)),
         batch_size=int(orch.get("batch_size", 100)),
         max_retries=int(orch.get("max_retries", 3)),
         retry_backoff_seconds=int(orch.get("retry_backoff_seconds", 5)),
@@ -780,6 +787,8 @@ def validate_config(cfg: Config) -> list[str]:
         errors.append("[raw_archive].compression must be 'gzip' or 'none'")
     if cfg.raw_archive_max_payload_bytes is not None and cfg.raw_archive_max_payload_bytes < 1:
         errors.append("[raw_archive].max_payload_bytes must be >= 1")
+    if cfg.revision_retained_generations < 2:
+        errors.append("[revisions].retained_generations must be >= 2")
     if cfg.raw_archive_datasets:
         from cnequity.domain.datasets import DATASETS
 

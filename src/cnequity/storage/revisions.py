@@ -122,6 +122,18 @@ class DatasetRevision:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class RevisionPruneResult:
+    """One bounded-retention cleanup result."""
+
+    dataset: str
+    dry_run: bool
+    kept_generations: tuple[str, ...]
+    removed_generations: tuple[str, ...]
+    removed_receipts: tuple[str, ...]
+    bytes_freed: int
+
+
 class RevisionStore:
     """Publish revision receipts and advance dataset state under one lock."""
 
@@ -130,6 +142,7 @@ class RevisionStore:
         meta_root: Path,
         curated_root: Path,
         derived_root: Path | None = None,
+        retained_generations: int | None = None,
     ):
         self.meta_root = Path(meta_root).expanduser()
         # ``root.mkdir`` below is the first filesystem mutation performed by
@@ -147,6 +160,9 @@ class RevisionStore:
             if derived_root is not None
             else self.curated_root.parent / "derived"
         )
+        if retained_generations is not None and retained_generations < 2:
+            raise ValueError("retained_generations must be >= 2")
+        self.retained_generations = retained_generations
         _reject_symlink_path(self.meta_root / "state", label="state root")
         self.root = self.meta_root / "revisions"
         _reject_symlink_path(self.root, label="revision root")
@@ -447,6 +463,142 @@ class RevisionStore:
             shutil.rmtree(destination, ignore_errors=True)
             raise
 
+    @classmethod
+    def _tree_allocated_bytes(cls, root: Path) -> int:
+        """Return allocated bytes without following links."""
+
+        total = 0
+        with os.scandir(root) as iterator:
+            for entry in iterator:
+                info = entry.stat(follow_symlinks=False)
+                path = Path(entry.path)
+                if stat.S_ISLNK(info.st_mode):
+                    raise RevisionConsistencyError(f"revision path is a symlink: {path}")
+                if stat.S_ISDIR(info.st_mode):
+                    total += cls._tree_allocated_bytes(path)
+                elif stat.S_ISREG(info.st_mode):
+                    total += info.st_blocks * 512
+                else:
+                    raise RevisionConsistencyError(f"revision path is not regular: {path}")
+        return total
+
+    def prune(
+        self,
+        dataset: str,
+        *,
+        retain: int,
+        dry_run: bool = False,
+        _locked: bool = False,
+    ) -> RevisionPruneResult:
+        """Keep the newest retained generations and remove older complete revisions."""
+
+        if retain < 1:
+            raise ValueError("retain must be >= 1")
+        if not _locked:
+            with lake_mutation_lock(self.meta_root, blocking=True):
+                return self.prune(dataset, retain=retain, dry_run=dry_run, _locked=True)
+
+        pointer = self._read_pointer(dataset)
+        if pointer is None:
+            return RevisionPruneResult(dataset, dry_run, (), (), (), 0)
+
+        current_revision = int(pointer["revision"])
+        generation_dir = self.root / "data" / dataset
+        receipt_dir = self.root / dataset
+        records: dict[int, tuple[str, Path | None]] = {}
+        legacy = generation_dir / _LEGACY_REVISION_ID
+        if legacy.is_dir():
+            records[0] = (_LEGACY_REVISION_ID, None)
+
+        for receipt_path in sorted(receipt_dir.glob("*.json")):
+            if receipt_path.name == "current.json":
+                continue
+            self._assert_regular(receipt_path)
+            try:
+                payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                raise RevisionConsistencyError(f"invalid revision receipt: {receipt_path}") from exc
+            if not isinstance(payload, dict) or payload.get("dataset") != dataset:
+                raise RevisionConsistencyError(f"invalid revision receipt: {receipt_path}")
+            revision = payload.get("revision")
+            revision_id = payload.get("revision_id")
+            generation_path = payload.get("generation_path")
+            if (
+                isinstance(revision, bool)
+                or not isinstance(revision, int)
+                or revision < 1
+                or not isinstance(revision_id, str)
+                or not revision_id
+            ):
+                raise RevisionConsistencyError(f"invalid revision receipt: {receipt_path}")
+            if not generation_path:
+                # Receipts from the pre-COW layout have no generation to reclaim.
+                continue
+            expected = (Path("revisions") / "data" / dataset / revision_id).as_posix()
+            if generation_path != expected or revision in records:
+                raise RevisionConsistencyError(f"invalid revision receipt: {receipt_path}")
+            records[revision] = (revision_id, receipt_path)
+
+        if current_revision not in records:
+            if current_revision != 0:
+                raise RevisionConsistencyError(f"current generation has no receipt: {dataset}")
+            if not legacy.is_dir():
+                raise RevisionConsistencyError(f"legacy generation is missing: {dataset}")
+
+        retained_revisions = sorted(
+            (revision for revision in records if revision <= current_revision), reverse=True
+        )[:retain]
+        kept_ids = {records[revision][0] for revision in retained_revisions}
+
+        removable_generations: list[Path] = []
+        if generation_dir.exists():
+            with os.scandir(generation_dir) as iterator:
+                for entry in sorted(iterator, key=lambda item: item.name):
+                    info = entry.stat(follow_symlinks=False)
+                    path = Path(entry.path)
+                    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                        raise RevisionConsistencyError(
+                            f"revision generation is not a directory: {path}"
+                        )
+                    if entry.name not in kept_ids:
+                        removable_generations.append(path)
+
+        removable_receipts = [
+            receipt_path
+            for revision, (_revision_id, receipt_path) in records.items()
+            if receipt_path is not None and revision not in retained_revisions
+        ]
+        bytes_freed = sum(self._tree_allocated_bytes(path) for path in removable_generations)
+
+        if not dry_run:
+            # Remove discoverability first. An interrupted cleanup may leave
+            # harmless orphan bytes, but never a receipt pointing at missing data.
+            for receipt_path in removable_receipts:
+                receipt_path.unlink()
+            for generation in removable_generations:
+                shutil.rmtree(generation)
+
+        return RevisionPruneResult(
+            dataset=dataset,
+            dry_run=dry_run,
+            kept_generations=tuple(sorted(kept_ids)),
+            removed_generations=tuple(path.name for path in removable_generations),
+            removed_receipts=tuple(path.name for path in removable_receipts),
+            bytes_freed=bytes_freed,
+        )
+
+    def prune_all(self, *, retain: int, dry_run: bool = False) -> tuple[RevisionPruneResult, ...]:
+        """Apply bounded retention to every dataset with a committed pointer."""
+
+        with lake_mutation_lock(self.meta_root, blocking=True):
+            datasets = sorted(
+                path.parent.name for path in self.root.glob("*/current.json") if path.is_file()
+            )
+            return tuple(
+                self.prune(dataset, retain=retain, dry_run=dry_run, _locked=True)
+                for dataset in datasets
+            )
+
     def ensure_current(self, dataset: str, *, _locked: bool = False) -> Path:
         """Materialise a legacy lake as revision-zero before a compact.
 
@@ -653,6 +805,17 @@ class RevisionStore:
             self.ensure_current(dataset, _locked=True)
             pointer = self._read_pointer(dataset)
         assert pointer is not None
+        if self.retained_generations is not None:
+            # Keep the current generation available while the next one is
+            # copied and published. After the pointer switch, the lake retains
+            # the configured current + previous window for lock-free readers.
+            self.prune(
+                dataset,
+                retain=self.retained_generations - 1,
+                _locked=True,
+            )
+            pointer = self._read_pointer(dataset)
+            assert pointer is not None
         current = pointer.get("revision", 0)
         if isinstance(current, bool) or not isinstance(current, int) or current < 0:
             raise RevisionConsistencyError(f"invalid current revision for {dataset}")

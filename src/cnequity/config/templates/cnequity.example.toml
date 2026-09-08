@@ -6,6 +6,11 @@
 [data]
 root = "./data/cnequity"
 
+[revisions]
+# Keep the current immutable generation and one previous generation. Older
+# pinned revisions become unavailable after `cne clean` or the next compact.
+retained_generations = 2
+
 [orchestrator]
 # `workers` remains the legacy/global process budget for non-TDX work.
 # Daily TDX bars are always serial: the client and SQLite manifest are unsafe

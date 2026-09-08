@@ -9,7 +9,7 @@ import pytest
 from cnequity.config import Config
 from cnequity.query import dataset_state
 from cnequity.storage.parquet import StagingWriter, compact_dataset
-from cnequity.storage.revisions import RevisionStore
+from cnequity.storage.revisions import RevisionConsistencyError, RevisionStore
 
 
 def _curated_file(root: Path, value: bytes = b"first") -> Path:
@@ -70,6 +70,78 @@ def test_revision_increments_when_an_old_partition_changes(tmp_path):
     assert first is not None and second is not None
     assert second.revision == first.revision + 1
     assert second.content_digest != first.content_digest
+
+
+def test_revision_retention_keeps_current_and_previous(tmp_path):
+    curated = tmp_path / "curated"
+    path = _curated_file(curated)
+    store = RevisionStore(
+        tmp_path / "meta",
+        curated,
+        retained_generations=2,
+    )
+
+    receipts = []
+    for revision, value in enumerate((b"first", b"second", b"third"), start=1):
+        path.write_bytes(value)
+        receipt = store.commit(
+            "daily_bars",
+            run_id=f"run-{revision}",
+            changed_files=[path],
+            schema_version=1,
+            contract_fingerprint="contract-sha",
+        )
+        assert receipt is not None
+        receipts.append(receipt)
+
+    generations = {path.name for path in (tmp_path / "meta/revisions/data/daily_bars").iterdir()}
+    assert generations == {receipts[1].revision_id, receipts[2].revision_id}
+    first_receipt = (
+        tmp_path / "meta/revisions/daily_bars" / f"00000001-{receipts[0].revision_id}.json"
+    )
+    assert not first_receipt.exists()
+    assert store.current_root("daily_bars", revision=2) == store.generation_root(
+        "daily_bars", receipts[1].revision_id
+    )
+    assert store.current_root("daily_bars", revision=3) == store.generation_root(
+        "daily_bars", receipts[2].revision_id
+    )
+    with pytest.raises(RevisionConsistencyError, match="unknown retained revision"):
+        store.current_root("daily_bars", revision=1)
+
+
+def test_revision_prune_dry_run_reports_without_removing(tmp_path):
+    curated = tmp_path / "curated"
+    path = _curated_file(curated)
+    store = RevisionStore(tmp_path / "meta", curated)
+    receipts = []
+    for revision, value in enumerate((b"first", b"second", b"third"), start=1):
+        path.write_bytes(value)
+        receipt = store.commit(
+            "daily_bars",
+            run_id=f"run-{revision}",
+            changed_files=[path],
+            schema_version=1,
+            contract_fingerprint="contract-sha",
+        )
+        assert receipt is not None
+        receipts.append(receipt)
+
+    preview = store.prune("daily_bars", retain=2, dry_run=True)
+    assert set(preview.kept_generations) == {
+        receipts[1].revision_id,
+        receipts[2].revision_id,
+    }
+    assert set(preview.removed_generations) == {"legacy", receipts[0].revision_id}
+    assert preview.removed_receipts == (f"00000001-{receipts[0].revision_id}.json",)
+    assert preview.bytes_freed > 0
+    assert store.current_root("daily_bars", revision=1).is_dir()
+
+    removed = store.prune("daily_bars", retain=2)
+    assert removed.removed_generations == preview.removed_generations
+    assert removed.bytes_freed == preview.bytes_freed
+    with pytest.raises(RevisionConsistencyError, match="unknown retained revision"):
+        store.current_root("daily_bars", revision=1)
 
 
 def test_revision_does_not_advance_without_changed_files(tmp_path):

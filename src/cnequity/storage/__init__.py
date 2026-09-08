@@ -10,6 +10,7 @@ from cnequity.storage.raw_archive import (
 from cnequity.storage.revisions import (
     DatasetRevision,
     RevisionConsistencyError,
+    RevisionPruneResult,
     RevisionStore,
     committed_revision,
     resolve_committed_root,
@@ -29,6 +30,7 @@ __all__ = [
     "DatasetRevision",
     "RevisionStore",
     "RevisionConsistencyError",
+    "RevisionPruneResult",
     "resolve_committed_root",
     "committed_revision",
     "SnapshotStore",

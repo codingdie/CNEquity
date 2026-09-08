@@ -14,7 +14,7 @@
 | `parquet.py` | `StagingWriter`, `CuratedWriter`, `compact_dataset()` |
 | `instruments.py` | instruments 合并 compact，保留退市股 |
 | `state.py` | `StateStore` — `meta/state/{dataset}.json` 水位（跨平台文件锁） |
-| `revisions.py` | `RevisionStore` — 单调 revision、内容摘要与不可变变更 receipt |
+| `revisions.py` | `RevisionStore` — 单调 revision、不可变 generation、内容摘要与保留清理 |
 | `atomic.py` | 写临时文件 → rename |
 | `stats.py` | `rebuild_stats()` — `meta/stats/` 行数 / 字节 / 溯源分布度量表 |
 | `source_snapshots.py` | `SnapshotStore` — failover 备源落地 |
@@ -76,13 +76,17 @@ staging/, curated/, derived/, raw/, meta/, duckdb/, backups/, meta/locks/
 - 增量窗口：`steps/common.incremental_window()` 读取
 
 revision 发布后，同一 state 文件还会保存 `revision`、`revision_id`、内容摘要、契约指纹和
-`revision_receipt`。最大日期不变的历史修复也会推进 revision，供 EquityLab 正确失效缓存。
+`revision_receipt`。最大日期不变的历史修复也会推进 revision，供下游正确失效缓存。
 
 ## revisions.py
 
 每次实际改写 curated 文件后，`RevisionStore` 对文件大小和 SHA-256 建立内容摘要，先原子写入
 `meta/revisions/{dataset}/{revision}-{revision_id}.json`，再推进 state。没有文件变化不会制造
 新 revision；receipt 写入后进程崩溃只会留下未引用的恢复证据，不会让 state 指向半成品。
+
+`[revisions].retained_generations` 默认是 2，即保留当前版和上一版。新 revision 发布前会在
+compact 锁内回收更早版本；`cne clean` 会对所有数据集执行同样的清理，并支持 `--dry-run`。
+被清理的旧 revision 不能再用于 pinned query。
 
 ---
 

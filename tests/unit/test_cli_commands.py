@@ -642,6 +642,12 @@ def test_clean_dry_run(cfg_path, monkeypatch):
     assert payload["dry_run"] is True
     assert payload["removed_run_ids"] == ["r1"]
     assert payload["bytes_freed"] == 120
+    assert payload["revisions"] == {
+        "retained_generations": 2,
+        "removed_generations": 0,
+        "removed_receipts": 0,
+        "bytes_freed": 0,
+    }
 
 
 def test_stats_show_scans_curated_when_no_stats_exist(tmp_path, cfg_path):

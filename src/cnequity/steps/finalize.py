@@ -140,6 +140,7 @@ def _publish_derived_revision(
         config.meta_root,
         config.curated_root,
         config.derived_root,
+        retained_generations=config.revision_retained_generations,
     ).commit(
         dataset,
         run_id=run_id,
@@ -340,7 +341,11 @@ def _compact_locked(config: Config, trade_date: date, run_id: str, context: dict
     skipped: list[dict] = []
     audit_findings: list[dict] = []
     changed_delist_identity_symbols: set[str] = set()
-    revisions = RevisionStore(config.meta_root, config.curated_root)
+    revisions = RevisionStore(
+        config.meta_root,
+        config.curated_root,
+        retained_generations=config.revision_retained_generations,
+    )
     lineage = runtime_lineage(config)
 
     for ds in staged:
@@ -658,6 +663,7 @@ def step_derive_adj_factors(config: Config, trade_date: date, run_id: str, conte
         config.meta_root,
         config.curated_root,
         config.derived_root,
+        retained_generations=config.revision_retained_generations,
     )
     try:
         # Keep the mutable writer tree seeded from the last committed
@@ -764,6 +770,7 @@ def step_derive_industry_index(
         config.meta_root,
         config.curated_root,
         config.derived_root,
+        retained_generations=config.revision_retained_generations,
     )
     try:
         derived_revisions.ensure_current("industry_index")
