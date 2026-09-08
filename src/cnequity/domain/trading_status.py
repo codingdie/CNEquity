@@ -51,12 +51,13 @@ from cnequity.domain.market_time import SHANGHAI_TZ
 STATUS_NORMAL = "normal"
 STATUS_SUSPENDED = "suspended"
 STATUS_DELISTED = "delisted"
+STATUS_NOT_LISTED = "not_listed"
 
 #: Trading states a row may carry. ``status`` no longer holds ST.
-TRADING_STATES = frozenset({STATUS_NORMAL, STATUS_SUSPENDED, STATUS_DELISTED})
+TRADING_STATES = frozenset({STATUS_NORMAL, STATUS_SUSPENDED, STATUS_DELISTED, STATUS_NOT_LISTED})
 
 #: States in which the security was not trading.
-NON_TRADING_STATES = frozenset({STATUS_SUSPENDED, STATUS_DELISTED})
+NON_TRADING_STATES = frozenset({STATUS_SUSPENDED, STATUS_DELISTED, STATUS_NOT_LISTED})
 
 #: How ST was encoded before ``risk_warning`` existed. Read-side only: nothing
 #: writes these any more, and the migration rewrites them.
@@ -66,6 +67,7 @@ LEGACY_ST_STATUSES = frozenset({"st", "*st"})
 #: from a vendor board: a delisted security appears on no daily board, so no
 #: snapshot can say it stopped trading.
 DELISTED_SOURCE = "derived_delisted"
+NOT_LISTED_SOURCE = "derived_not_listed"
 
 
 def risk_warning_expr(columns: Iterable[str]) -> pl.Expr:

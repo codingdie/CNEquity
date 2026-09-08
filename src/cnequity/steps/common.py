@@ -851,8 +851,9 @@ def classify_daily_bar_ownership(
     an incomplete source response remains ``unknown`` and must be retried.
 
     ``bar_universe`` is historical positive-volume evidence. It is used for
-    the narrow undated-ETF placeholder case, where a symbol with no observed
-    traded bar is not safe to send through the expensive per-symbol fallback.
+    the narrow undated-security placeholder case, where a stock or ETF with no
+    observed traded bar is not safe to send through the expensive per-symbol
+    fallback.
     """
     from cnequity.domain.symbols import is_etf_symbol, parse_symbol
 
@@ -924,6 +925,24 @@ def classify_daily_bar_ownership(
                 out.no_data_reasons[normalized] = "trading_status_non_trading"
                 continue
             if positive_status:
+                # A positive status row is not enough to certify an undated
+                # ETF/stock as already tradable. The daily boards return
+                # ``normal`` for any code that is not on the suspension/ST
+                # lists, so a not-yet-listed security would otherwise bypass
+                # the placeholder reconciliation below (observed 2026-09-08:
+                # undated ETF/LOF/stock codes without a single traded bar were
+                # forced into ``generic`` by EastMoney's default ``normal``).
+                # Only historical traded-bar evidence or an explicit listing
+                # date may promote it to a real coverage obligation.
+                if (
+                    len(span) >= 3
+                    and asset_type in ("etf", "stock")
+                    and list_date is None
+                    and bar_universe is not None
+                    and normalized not in normalized_bar_universe
+                ):
+                    out.placeholder.append(normalized)
+                    continue
                 # Positive status evidence means a missing bar is a real
                 # coverage obligation, even if an old negative cache exists.
                 if len(span) >= 3 and asset_type is None:
@@ -947,12 +966,12 @@ def classify_daily_bar_ownership(
             # dedicated fallback or certify the wrong no-data reason.
             out.unknown.append(normalized)
         elif (
-            asset_type == "etf"
+            asset_type in ("etf", "stock")
             and list_date is None
             and bar_universe is not None
             and normalized not in normalized_bar_universe
         ):
-            # This is likely an issued-but-not-yet-listed fund code, but a
+            # This is likely an issued-but-not-yet-listed security, but a
             # delayed list_date enrichment is indistinguishable here. Keep it
             # out of the fetch batch without claiming the absence was proven.
             out.placeholder.append(normalized)

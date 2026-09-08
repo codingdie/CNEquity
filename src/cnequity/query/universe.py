@@ -26,7 +26,7 @@ from cnequity.storage.revisions import resolve_committed_root
 # Statuses a tradable-universe query drops. ST no longer lives in `status`, so
 # the risk-warning test is a separate predicate (`_excluded_status_expr`) that
 # also understands the legacy encoding.
-EXCLUDED_STATUSES = frozenset({"suspended", "delisted", "st", "*st"})
+EXCLUDED_STATUSES = frozenset({"suspended", "delisted", "not_listed", "st", "*st"})
 
 
 def _excluded_status_expr(columns) -> pl.Expr:

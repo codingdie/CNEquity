@@ -198,6 +198,8 @@ def test_completed_future_does_not_receive_fake_stale_timeout(worker_config, mon
     # This regression targets the Linux ProcessPool path.  macOS intentionally
     # resolves ``auto`` to the safe thread backend now.
     monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(worker_config, "tdx_daily_worker_count", lambda: 2)
+    monkeypatch.setattr(worker_config, "tdx_daily_executor", lambda: "process")
     init_data_layout(worker_config)
     run_id = Manifest(worker_config.manifest_path).start_run("test")
     observed_timeouts: list[object] = []
@@ -247,6 +249,8 @@ def test_process_pool_submits_only_pending_batches_and_sizes_pool_to_pending(
 ):
     """A committed success is neither submitted nor counted a second time."""
     monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(worker_config, "tdx_daily_worker_count", lambda: 3)
+    monkeypatch.setattr(worker_config, "tdx_daily_executor", lambda: "process")
     init_data_layout(worker_config)
     manifest = Manifest(worker_config.manifest_path)
     run_id = manifest.start_run("test")

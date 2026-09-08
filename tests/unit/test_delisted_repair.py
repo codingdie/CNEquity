@@ -7,6 +7,7 @@ import polars as pl
 
 from cnequity.config import Config
 from cnequity.domain.schemas import DAILY_BARS_SCHEMA
+from cnequity.steps.common import classify_daily_bar_ownership
 from cnequity.steps.delisted import (
     _ingested_symbols,
     catalog_path,
@@ -133,6 +134,28 @@ def test_repair_picks_up_orphan_bars_not_in_the_catalog(tmp_path):
     assert result["from_orphan_bars"] == 1
     assert row["delist_date"].item() == date(2020, 1, 7)
     assert row["list_date"].item() == date(2016, 1, 4)
+
+
+def test_repair_retires_601313_and_removes_it_from_current_bar_obligations(tmp_path):
+    """The pre-rename 601313 series must not block current daily bars."""
+    cfg = _cfg(tmp_path, {}, live=("601360.SH",))
+    _write_bars(cfg, "601313.SH", date(2016, 1, 4), date(2018, 2, 14))
+
+    result = repair_delisted_instruments(cfg, "run-1")
+
+    staged = _staged(cfg, "instruments", "run-1")
+    row = staged.filter(pl.col("symbol") == "601313.SH")
+    assert result["from_orphan_bars"] == 1
+    assert row["list_date"].item() == date(2016, 1, 4)
+    assert row["delist_date"].item() == date(2018, 2, 14)
+    ownership = classify_daily_bar_ownership(
+        ["601313.SH"],
+        {"601313.SH": (row["list_date"].item(), row["delist_date"].item(), "stock")},
+        date(2026, 9, 8),
+        date(2026, 9, 8),
+    )
+    assert ownership.expected_no_data == ["601313.SH"]
+    assert ownership.no_data_reasons == {"601313.SH": "delisted_before_window"}
 
 
 def test_repair_ignores_zero_volume_tail_when_finding_orphan_bars(tmp_path):

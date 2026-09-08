@@ -247,8 +247,8 @@ def test_validate_config_allows_multiprocess_on_windows(tmp_path, monkeypatch):
     assert validate_config(cfg) == []
 
 
-def test_load_config_parses_independent_tdx_http_and_group_budgets(tmp_path, monkeypatch):
-    """The macOS global process guard must not collapse source-local pools."""
+def test_load_config_parses_independent_http_and_group_budgets(tmp_path, monkeypatch):
+    """Daily TDX stays serial while other source-local budgets remain independent."""
     monkeypatch.setattr(sys, "platform", "darwin")
     path = tmp_path / "split.toml"
     path.write_text(
@@ -280,7 +280,7 @@ steps = ["instruments"]
     cfg = load_config(path)
 
     assert cfg.workers == 1
-    assert cfg.tdx_daily_worker_count() == 3
+    assert cfg.tdx_daily_worker_count() == 1
     assert cfg.tdx_daily_executor() == "thread"
     assert cfg.adj_factor_worker_count() == 5
     # Source-local configuration has precedence over the legacy alias map.

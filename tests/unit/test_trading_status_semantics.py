@@ -22,8 +22,10 @@ from cnequity.config import Config
 from cnequity.domain.schemas import validate_dataframe, with_provenance
 from cnequity.domain.trading_status import (
     DELISTED_SOURCE,
+    NOT_LISTED_SOURCE,
     STATUS_DELISTED,
     STATUS_NORMAL,
+    STATUS_NOT_LISTED,
     STATUS_SUSPENDED,
     normalize_legacy,
     risk_warning_expr,
@@ -238,6 +240,56 @@ def test_a_lake_with_no_delistings_writes_only_vendor_rows(lake, monkeypatch):
     )
     reference.step_trading_status(lake, TD, "run-clean", {})
     assert set(_staged(lake)["source"]) == {"eastmoney"}
+
+
+def test_a_not_yet_listed_symbol_is_not_published_as_trading(lake, monkeypatch):
+    from cnequity.steps import reference
+
+    part = lake.curated_root / "instruments"
+    part.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "589430.SH"],
+            "name": ["贵州茅台", "某ETF"],
+            "exchange": ["SH", "SH"],
+            "asset_type": ["stock", "etf"],
+            "list_date": [date(2000, 1, 1), date(2026, 9, 10)],
+            "delist_date": [None, None],
+            "prev_symbol": [None, None],
+            "source": ["tdx_protocol", "tdx_protocol"],
+            "data_version": ["v1", "v1"],
+            "fetched_at": [datetime.now(timezone.utc), datetime.now(timezone.utc)],
+        },
+        schema_overrides={"delist_date": pl.Date, "name": pl.Utf8, "prev_symbol": pl.Utf8},
+    ).write_parquet(part / "part-merged.parquet")
+
+    requested: list[list[str]] = []
+
+    def _fetch(symbols, day, **_kw):
+        requested.append(list(symbols))
+        return pl.DataFrame(
+            {
+                "symbol": list(symbols),
+                "trade_date": [day] * len(symbols),
+                "is_trading": [True] * len(symbols),
+                "status": [STATUS_NORMAL] * len(symbols),
+                "risk_warning": [False] * len(symbols),
+            }
+        )
+
+    monkeypatch.setattr(reference, "load_symbols", lambda _c: ["600519.SH", "589430.SH"])
+    monkeypatch.setattr(reference, "fetch_trading_status", _fetch)
+    reference.step_trading_status(lake, TD, "run-not-listed", {})
+
+    assert requested == [["600519.SH"]]
+    rows = {r["symbol"]: r for r in _staged(lake).iter_rows(named=True)}
+    assert rows["589430.SH"]["status"] == STATUS_NOT_LISTED
+    assert rows["589430.SH"]["is_trading"] is False
+    # The write path normalizes a null designation to no-risk-warning, the
+    # same encoding every non-ST row carries.
+    assert rows["589430.SH"]["risk_warning"] is False
+    assert rows["589430.SH"]["source"] == NOT_LISTED_SOURCE
+    assert rows["600519.SH"]["status"] == STATUS_NORMAL
 
 
 # --- downstream consumers -----------------------------------------------------

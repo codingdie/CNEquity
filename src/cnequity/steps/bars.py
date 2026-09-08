@@ -164,18 +164,18 @@ def _classify_daily_scope(
     )
 
 
-def _etf_placeholder_bar_universe(
+def _placeholder_bar_universe(
     config: Config,
     spans: dict[str, tuple[date | None, date | None, str | None]],
 ) -> set[str] | None:
-    """Return traded bars only when an undated ETF needs reconciliation.
+    """Return traded bars only when an undated security needs reconciliation.
 
     Scanning every daily_bars file is unnecessary for normal runs. An empty
-    traded universe is also not evidence that every undated ETF is a
+    traded universe is also not evidence that every undated security is a
     placeholder, so leave the classifier conservative in a brand-new lake.
     """
     if not any(
-        asset_type == "etf" and list_date is None
+        asset_type in ("etf", "stock") and list_date is None
         for list_date, _delist_date, asset_type in spans.values()
     ):
         return None
@@ -217,9 +217,9 @@ def _ownership_context(
             {
                 "dataset": "daily_bars",
                 "severity": "warning",
-                "check": "daily_bars_etf_placeholder_skipped",
+                "check": "daily_bars_placeholder_skipped",
                 "message": (
-                    f"{len(ownership.placeholder)} undated ETF/LOF placeholder(s) "
+                    f"{len(ownership.placeholder)} undated ETF/LOF/stock placeholder(s) "
                     "skipped (no list_date and no traded bar; not verified "
                     f"no-data): {preview}{suffix}"
                 ),
@@ -517,7 +517,7 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
         end = max(e for _, e in windows)
         _reject_unfinished_daily_bar_window(config, end)
         spans = _instrument_spans(config)
-        bar_universe = _etf_placeholder_bar_universe(config, spans)
+        bar_universe = _placeholder_bar_universe(config, spans)
         metadata = instrument_metadata(config)
         evidence = load_negative_evidence(config, "daily_bars", metadata=metadata)
         remaining: list[tuple[str, list[str], date, date]] = []
@@ -581,7 +581,7 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
                 Manifest(config.manifest_path).supersede_batches(
                     run_id,
                     [batch_id],
-                    superseded_by="ownership-etf-placeholder",
+                    superseded_by="ownership-placeholder",
                 )
         result = (
             fetch_daily_bars_parallel(
@@ -680,7 +680,7 @@ def step_daily_bars(config: Config, trade_date: date, run_id: str, context: dict
         spans,
         start,
         end,
-        bar_universe=_etf_placeholder_bar_universe(config, spans),
+        bar_universe=_placeholder_bar_universe(config, spans),
         trading_status=load_curated_trading_status(
             config,
             start=start,
@@ -1466,27 +1466,27 @@ def _staged_daily_bar_partial_symbols(
     }
 
 
-def _undated_etf_pre_trading_sessions(
+def _undated_pre_trading_sessions(
     symbol: str,
     span: tuple[date | None, date | None] | tuple[date | None, date | None, str | None],
     sessions: list[date],
     status_by_symbol: dict[str, dict[date, bool | None]],
     bar_universe: set[str] | None,
 ) -> set[date]:
-    """Return provably pre-trading sessions for an undated, newly listed ETF.
+    """Return provably pre-trading sessions for an undated, newly listed security.
 
-    TDX omits ``list_date`` for some ETFs.  A five-session reconciliation can
+    TDX omits ``list_date`` for some ETFs/stocks.  A five-session reconciliation can
     therefore cross the listing boundary: a normal status appears only after
-    the ETF is listed, while the earlier sessions have no status row at all.
+    the security is listed, while the earlier sessions have no status row at all.
     Treat only that leading prefix as outside the bar window.  An established
-    ETF, an explicit suspended session, or a gap after its first normal status
+    security, an explicit suspended session, or a gap after its first normal status
     remains a strict coverage obligation.
     """
     list_date = span[0]
     asset_type = span[2] if len(span) >= 3 else None
     normalized = str(symbol).strip().upper()
     if (
-        asset_type != "etf"
+        asset_type not in ("etf", "stock")
         or list_date is not None
         or bar_universe is None
         or normalized in bar_universe
@@ -1537,7 +1537,7 @@ def _staged_daily_bar_missing_keys(
     observed_symbols = set(staged["symbol"].to_list())
     missing: set[tuple[str, date]] = set()
     metadata = _instrument_spans(config)
-    bar_universe = _etf_placeholder_bar_universe(config, metadata)
+    bar_universe = _placeholder_bar_universe(config, metadata)
     status_by_symbol: dict[str, dict[date, bool | None]] = {}
     status = load_curated_trading_status(
         config,
@@ -1559,7 +1559,7 @@ def _staged_daily_bar_missing_keys(
         expected_start = max(start, list_date) if list_date is not None else start
         expected_end = min(end, delist_date) if delist_date is not None else end
         expected = {session for session in sessions if expected_start <= session <= expected_end}
-        pre_trading = _undated_etf_pre_trading_sessions(
+        pre_trading = _undated_pre_trading_sessions(
             row["symbol"], span, sessions, status_by_symbol, bar_universe
         )
         missing.update(
@@ -2595,7 +2595,8 @@ def _history_plan(config: Config, start: date, end: date) -> list[tuple[str, dat
       route is limited to SH/SZ.
       An ETF with no ``list_date`` is an unlisted placeholder (or an enrichment
       gap) with no verifiable history, so it is skipped rather than planned and
-      failed.
+      failed. Stocks remain eligible because this historical repair path can
+      recover their missing listing metadata from observed bars.
     * Nothing listed after the window. A 2016 IPO has no pre-2016 history, and
       asking for it is ~2600 symbols' worth of empty year files.
     * The rest start at their listing year rather than at ``start``.

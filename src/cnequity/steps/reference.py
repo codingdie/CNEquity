@@ -26,7 +26,9 @@ from cnequity.domain.symbols import (
 )
 from cnequity.domain.trading_status import (
     DELISTED_SOURCE,
+    NOT_LISTED_SOURCE,
     STATUS_DELISTED,
+    STATUS_NOT_LISTED,
     STATUS_SUSPENDED,
 )
 from cnequity.orchestrator.manifest import Manifest
@@ -319,6 +321,37 @@ def _delisted_status_rows(
     )
 
 
+def _not_listed_status_rows(
+    not_listed_dates: dict[str, date],
+    symbols: list[str],
+    days: list[date],
+) -> pl.DataFrame:
+    """One ``status=not_listed`` row per (symbol, day) before its listing date.
+
+    Like ``delisted``, this fact is answered by ``instruments`` rather than by
+    a vendor board. The row must not claim any risk-warning evidence because
+    the pre-listing code never appeared on an exchange designation board.
+    """
+    if not not_listed_dates or not symbols or not days:
+        return pl.DataFrame()
+    rows = [
+        {
+            "symbol": symbol,
+            "trade_date": day,
+            "is_trading": False,
+            "status": STATUS_NOT_LISTED,
+            "risk_warning": None,
+            "source": NOT_LISTED_SOURCE,
+        }
+        for symbol in symbols
+        for day in days
+        if (listed_at := not_listed_dates.get(symbol)) is not None and listed_at > day
+    ]
+    if not rows:
+        return pl.DataFrame()
+    return pl.DataFrame(rows, schema_overrides={"risk_warning": pl.Boolean})
+
+
 @register_step("trading_status", group="core")
 def step_trading_status(config: Config, trade_date: date, run_id: str, context: dict) -> dict:
     if getattr(config, "_backfill", False):
@@ -343,11 +376,32 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
         if not delisted.is_empty()
         else {}
     )
+    # An issued-but-not-yet-listed code is on no daily board. EastMoney's
+    # suspension/ST lists only answer live names; an ``else`` branch would
+    # publish it as ``normal`` and let the daily_bars ownership classifier
+    # treat a nonexistent session as a real coverage obligation.
+    not_listed_dates: dict[str, date] = {}
+    instruments_frame = load_curated_instruments(config)
+    if instruments_frame is not None and not instruments_frame.is_empty():
+        if {"symbol", "list_date"}.issubset(instruments_frame.columns):
+            future = instruments_frame.filter(
+                pl.col("list_date").is_not_null() & (pl.col("list_date") > pl.lit(trade_date))
+            )
+            not_listed_dates = dict(
+                zip(future["symbol"], future["list_date"], strict=True),
+            )
 
     def _live_symbols(day: date) -> list[str]:
-        if not delist_dates:
-            return symbols
-        return [sym for sym in symbols if (gone := delist_dates.get(sym)) is None or gone > day]
+        out = []
+        for sym in symbols:
+            gone = delist_dates.get(sym)
+            if gone is not None and gone <= day:
+                continue
+            listed_at = not_listed_dates.get(sym)
+            if listed_at is not None and listed_at > day:
+                continue
+            out.append(sym)
+        return out
 
     # EastMoney is the only daily ST feed. An AkShare union used to sit here as a
     # "second source", but `ak.stock_zh_a_st_em` requests the same push2 clist
@@ -426,13 +480,14 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
         return pl.DataFrame(rows, schema_overrides={"risk_warning": pl.Boolean})
 
     def _fetch(day: date):
-        """Vendor rows for the live universe plus this day's delisted rows.
+        """Vendor rows for the live universe plus derived delisted/not-listed rows.
 
         The two are merged here rather than after the fetch so that a day whose
         whole universe has delisted still produces rows, and so that each row
         carries the owner that actually knows the fact.
         """
         gone = _delisted_status_rows(delisted, symbols, [day])
+        not_listed = _not_listed_status_rows(not_listed_dates, symbols, [day])
         vendor = _fetch_vendor(day)
         # `with_columns_unless_blank`: a session whose whole universe had
         # delisted returns the column-less empty frame, and stamping it would
@@ -441,19 +496,24 @@ def step_trading_status(config: Config, trade_date: date, run_id: str, context: 
             vendor.drop("source", strict=False),
             pl.lit(None, dtype=pl.Utf8).alias("source"),
         )
-        if gone.is_empty():
+        derived = (
+            pl.concat([gone, not_listed], how="diagonal_relaxed")
+            if not gone.is_empty() or not not_listed.is_empty()
+            else pl.DataFrame()
+        )
+        if derived.is_empty():
             return vendor
         if vendor.is_empty():
-            return gone
-        return pl.concat([vendor, gone], how="diagonal_relaxed")
+            return derived
+        return pl.concat([vendor, derived], how="diagonal_relaxed")
 
     def _fetch_vendor(day: date):
         nonlocal cached_snapshot
         day_symbols = _live_symbols(day)
         if not day_symbols:
-            # Every name in the universe had already delisted by this session.
-            # Asking the boards about nothing is a wasted request, not a state
-            # the adapters are expected to handle.
+            # Every applicable name is derived by `instruments` this session
+            # (delisted rows are still merged by the caller). Asking the boards
+            # about nothing is neither a fetch nor an empty snapshot.
             return pl.DataFrame()
         expected_symbols = set(day_symbols)
         try:

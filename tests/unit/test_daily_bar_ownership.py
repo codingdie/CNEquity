@@ -8,7 +8,7 @@ from cnequity.steps.bars import (
     _instrument_spans,
     _record_delegated_ownership_batch,
     _staged_daily_bar_missing_keys,
-    _undated_etf_pre_trading_sessions,
+    _undated_pre_trading_sessions,
     step_daily_bars,
 )
 from cnequity.steps.common import classify_daily_bar_ownership, load_curated_trading_status
@@ -96,11 +96,86 @@ def test_unlisted_etf_without_bar_universe_stays_generic():
     assert result.generic == ["589430.SH"]
 
 
+def test_undated_etf_placeholder_wins_over_positive_status():
+    """A vendor ``normal`` row must not promote an undated untraded ETF.
+
+    EastMoney's daily boards answer live names only; any code absent from the
+    suspension/ST lists is returned as ``normal``. An issued-but-not-listed
+    fund therefore used to bypass the placeholder reconciliation and become a
+    mandatory fetch. Without a listing date or any traded bar, the placeholder
+    route is the only evidence-backed answer.
+    """
+    symbols = ["589430.SH", "588200.SH"]
+    spans = {
+        "589430.SH": (None, None, "etf"),
+        "588200.SH": (date(2022, 10, 26), None, "etf"),
+    }
+    status = pl.DataFrame(
+        {
+            "symbol": symbols,
+            "trade_date": [date(2026, 8, 18)] * 2,
+            "is_trading": [True, True],
+            "status": ["normal", "normal"],
+        }
+    )
+
+    result = classify_daily_bar_ownership(
+        symbols,
+        spans,
+        date(2026, 8, 18),
+        date(2026, 8, 18),
+        bar_universe={"588200.SH"},
+        trading_status=status,
+        trading_sessions=[date(2026, 8, 18)],
+    )
+
+    assert result.placeholder == ["589430.SH"]
+    assert result.generic == ["588200.SH"]
+    assert result.expected_no_data == []
+
+
+def test_undated_stock_placeholder_wins_over_positive_status():
+    """An issued-but-not-listed IPO must not become a mandatory fetch.
+
+    The same EastMoney default-``normal`` trap that hit undated ETFs also hits
+    new stock codes before their first trading day: the boards answer ``normal``
+    for anything absent from the suspension/ST lists, and a code with no
+    listing date and no traded bar would otherwise be retried forever while
+    the vendor simply has nothing to return.
+    """
+    symbols = ["301699.SZ", "600519.SH"]
+    spans = {
+        "301699.SZ": (None, None, "stock"),
+        "600519.SH": (date(2001, 8, 27), None, "stock"),
+    }
+    status = pl.DataFrame(
+        {
+            "symbol": symbols,
+            "trade_date": [date(2026, 9, 8), date(2026, 9, 8)],
+            "is_trading": [True, True],
+            "status": ["normal", "normal"],
+        }
+    )
+
+    result = classify_daily_bar_ownership(
+        symbols,
+        spans,
+        date(2026, 9, 8),
+        date(2026, 9, 8),
+        bar_universe={"600519.SH"},
+        trading_status=status,
+        trading_sessions=[date(2026, 9, 8)],
+    )
+
+    assert result.placeholder == ["301699.SZ"]
+    assert result.generic == ["600519.SH"]
+
+
 def test_undated_new_etf_excludes_only_leading_sessions_before_first_normal_status():
     sessions = [date(2026, 8, 28), date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)]
     status = {"589453.SH": {date(2026, 9, 2): True}}
 
-    assert _undated_etf_pre_trading_sessions(
+    assert _undated_pre_trading_sessions(
         "589453.SH",
         (None, None, "etf"),
         sessions,
@@ -114,7 +189,7 @@ def test_undated_etf_does_not_hide_post_listing_or_established_etf_gaps():
     status = {"589453.SH": {date(2026, 9, 2): True, date(2026, 9, 4): True}}
 
     assert (
-        _undated_etf_pre_trading_sessions(
+        _undated_pre_trading_sessions(
             "589453.SH",
             (None, None, "etf"),
             sessions,
@@ -124,7 +199,7 @@ def test_undated_etf_does_not_hide_post_listing_or_established_etf_gaps():
         == set()
     )
     assert (
-        _undated_etf_pre_trading_sessions(
+        _undated_pre_trading_sessions(
             "589453.SH",
             (None, None, "etf"),
             sessions,
@@ -259,7 +334,7 @@ def test_retry_only_etf_placeholder_is_audited_and_unblocks_original_batch(tmp_p
     assert manifest.get_batch(run_id, "placeholder-retry")["status"] == "superseded"
     assert result["context_updates"]["daily_bars_ownership"]["placeholder"] == 1
     assert any(
-        finding["check"] == "daily_bars_etf_placeholder_skipped"
+        finding["check"] == "daily_bars_placeholder_skipped"
         for finding in result["context_updates"]["audit_findings"]
     )
 
