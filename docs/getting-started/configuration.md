@@ -275,6 +275,7 @@ names = [
 | `CNE_LOG_DIR` | `{data.root}/logs` | 日志目录 |
 | `CNE_GROUPS` | 全部调度组（不含需显式开启的 `intraday`） | 覆盖 pipeline 要跑的组 |
 | `CNE_NOTIFY` | `1` | `0` 关闭 macOS 通知 |
+| `CNE_BACKUP_META` | `1` | `0` 关闭 daily pipeline 收尾的元数据备份 |
 | `CNE_BACKUP_DIR` | 湖内 backups | 元数据备份目录 |
 | `CNE_BACKUP_RETENTION_DAYS` | 14 | 备份保留天数 |
 

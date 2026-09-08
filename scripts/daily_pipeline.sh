@@ -26,6 +26,7 @@
 #      CNE_STALE_RETRY_DELAY_SEC=1800 (default) — 兼容补抓前等多久，
 #      CNE_SOURCE_HEALTH=1 (default) — 每日串行探测并积累 SLO 样本；0 关闭，
 #      CNE_SOURCE_VANTAGE=local — 当前网络出口的稳定标签，
+#      CNE_BACKUP_META=1 (default) — 收尾生成元数据备份；0 关闭，
 #      CNE_TRADE_DATE (same as optional CLI arg — catch up a prior session).
 set -uo pipefail
 
@@ -58,6 +59,7 @@ STALE_RETRY="${CNE_STALE_RETRY:-0}"
 STALE_RETRY_DELAY_SEC="${CNE_STALE_RETRY_DELAY_SEC:-1800}"
 SOURCE_HEALTH="${CNE_SOURCE_HEALTH:-1}"
 SOURCE_VANTAGE="${CNE_SOURCE_VANTAGE:-local}"
+BACKUP_META="${CNE_BACKUP_META:-1}"
 
 # `mkdir` is the portable atomic primitive available in macOS Bash 3.2. Keep
 # one lock around the entire script so the independently scheduled stale pass
@@ -170,8 +172,12 @@ if ! "$CNE" stability --config "$CONFIG" --days 20 >>"$LOG" 2>&1; then
 fi
 
 log "--- backup ---"
-if ! "$REPO_ROOT/scripts/backup_meta.sh" >>"$LOG" 2>&1; then
-  log "backup FAILED"
+if [[ "$BACKUP_META" == "1" ]]; then
+  if ! "$REPO_ROOT/scripts/backup_meta.sh" >>"$LOG" 2>&1; then
+    log "backup FAILED"
+  fi
+else
+  log "backup disabled (CNE_BACKUP_META=${BACKUP_META})"
 fi
 
 # Staging is per-run scratch; once a run succeeded and compact merged it into

@@ -403,6 +403,22 @@ def test_daily_pipeline_exits_0_when_every_group_succeeds(tmp_path):
     assert "DONE ok" in result.stdout
 
 
+def test_daily_pipeline_can_disable_metadata_backup(tmp_path):
+    cne = _stub_cne_failing_groups(tmp_path)
+    env = _daily_env(
+        tmp_path,
+        cne,
+        tmp_path / "calls",
+        CNE_BACKUP_META="0",
+    )
+
+    result = _run_daily(env)
+
+    assert result.returncode == 0
+    assert "backup disabled (CNE_BACKUP_META=0)" in result.stdout
+    assert not (tmp_path / "lake" / "backups").exists()
+
+
 def test_health_notify_honours_the_same_cne_override_as_the_pipeline(tmp_path):
     """`daily_pipeline.sh` runs this script and honours CNE_BIN; this one
     hardcoded the repo venv, so an override left the health gate probing a
