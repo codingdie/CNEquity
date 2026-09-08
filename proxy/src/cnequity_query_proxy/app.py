@@ -5,11 +5,12 @@ from __future__ import annotations
 import hmac
 import re
 import threading
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from typing import Annotated, Literal, cast
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from cnequity_query_proxy.factors import AdjustmentFactorService, FactorAdjustment
@@ -23,9 +24,15 @@ from cnequity_query_proxy.kline import (
     QueryFailed,
     QueryTooWide,
 )
+from cnequity_query_proxy.market_daily_bars import (
+    MarketDailyBarsService,
+    NoBatchParquetFiles,
+    ParquetBatchService,
+)
 from cnequity_query_proxy.minute_kline import MinuteKlineService
 from cnequity_query_proxy.period_kline import PeriodKlineService
 from cnequity_query_proxy.settings import ProxySettings
+from cnequity_query_proxy.summary import InstrumentNotFound, StockSummaryService
 from cnequity_query_proxy.trading_status import TradingState, TradingStatusService
 
 _SYMBOL = re.compile(r"^[0-9A-Z]{6}\.(?:SH|SZ|BJ)$")
@@ -251,6 +258,150 @@ class TradingStatusPageResponse(BaseModel):
     )
 
 
+class ProvenanceResponse(BaseModel):
+    """摘要内一条落盘事实的来源和采集时间。"""
+
+    source: str
+    data_version: str
+    fetched_at: datetime | None
+
+
+class StockSummaryInstrumentResponse(BaseModel):
+    symbol: str
+    name: str
+    exchange: str
+    asset_type: str
+    list_date: date | None
+    delist_date: date | None
+    prev_symbol: str | None
+    provenance: ProvenanceResponse
+
+
+class StockSummaryLatestMarketResponse(BaseModel):
+    """最新可用日级行情快照，不是 K 线序列或实时盘口。"""
+
+    trade_date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int | None
+    amount: float | None
+    provenance: ProvenanceResponse
+
+
+class StockSummaryTradingStatusResponse(BaseModel):
+    trade_date: date
+    is_trading: bool
+    status: str
+    risk_warning: bool | None
+    provenance: ProvenanceResponse
+
+
+class StockSummaryValuationResponse(BaseModel):
+    trade_date: date
+    pe_ttm: float | None
+    pb: float | None
+    ps_ttm: float | None
+    total_mv: float | None
+    float_mv: float | None
+    provenance: ProvenanceResponse
+
+
+class StockSummaryMarketResponse(BaseModel):
+    latest_market: StockSummaryLatestMarketResponse | None
+    trading_status: StockSummaryTradingStatusResponse | None
+    valuation: StockSummaryValuationResponse | None
+
+
+class StockSummaryIndustryResponse(BaseModel):
+    classification_system: str
+    industry_code: str
+    industry_name: str
+    as_of_date: date
+    provenance: ProvenanceResponse
+
+
+class StockSummarySectorResponse(BaseModel):
+    sector_code: str
+    sector_name: str
+    as_of_date: date
+    provenance: ProvenanceResponse
+
+
+class StockSummaryIndexMembershipResponse(BaseModel):
+    index_symbol: str
+    as_of_date: date
+    weight: float | None = Field(
+        default=None,
+        description="数据源未提供成分权重时为 null；不能将其理解为零权重。",
+    )
+    provenance: ProvenanceResponse
+
+
+class StockSummaryClassificationResponse(BaseModel):
+    industries: list[StockSummaryIndustryResponse]
+    sectors: list[StockSummarySectorResponse]
+    index_memberships: list[StockSummaryIndexMembershipResponse]
+
+
+class StockSummaryFundFlowResponse(BaseModel):
+    trade_date: date
+    main_net_inflow: float | None
+    super_large_net_inflow: float | None
+    large_net_inflow: float | None
+    medium_net_inflow: float | None
+    small_net_inflow: float | None
+    provenance: ProvenanceResponse
+
+
+class StockSummaryAnalystConsensusResponse(BaseModel):
+    forecast_date: date
+    forecast_year: int | None
+    eps_forecast: float | None
+    pe_forecast: float | None
+    target_price: float | None
+    rating: str | None
+    analyst_count: int | None
+    provenance: ProvenanceResponse
+
+
+class StockSummaryHotRankResponse(BaseModel):
+    trade_date: date
+    rank: int | None
+    rank_change: int | None
+    hist_rank: int | None
+    provenance: ProvenanceResponse
+
+
+class StockSummarySentimentResponse(BaseModel):
+    trade_date: date
+    score_channel: str
+    sentiment_score: float | None
+    headline_count: int | None
+    provenance: ProvenanceResponse
+
+
+class StockSummarySignalsResponse(BaseModel):
+    fund_flow: StockSummaryFundFlowResponse | None
+    analyst_consensus: StockSummaryAnalystConsensusResponse | None
+    hot_rank: StockSummaryHotRankResponse | None
+    sentiments: list[StockSummarySentimentResponse]
+
+
+class StockSummaryResponse(BaseModel):
+    """单只证券的轻量当前摘要，不包含历史时序或长表明细。"""
+
+    symbol: str
+    instrument: StockSummaryInstrumentResponse
+    market: StockSummaryMarketResponse
+    classification: StockSummaryClassificationResponse
+    signals: StockSummarySignalsResponse
+    unavailable_datasets: list[str] = Field(
+        description="本地目录不存在或尚无 Parquet 文件的可选摘要数据集。"
+    )
+
+
 def _normalize_symbol(value: str, *, parameter: str = "symbol") -> str:
     symbol = value.upper()
     if not _SYMBOL.fullmatch(symbol):
@@ -369,6 +520,20 @@ def create_app(settings: ProxySettings) -> FastAPI:
     five_minute_kline_service = MinuteKlineService(settings, interval="5m", slots=query_slots)
     weekly_kline_service = PeriodKlineService(settings, interval="1w", slots=query_slots)
     monthly_kline_service = PeriodKlineService(settings, interval="1mo", slots=query_slots)
+    stock_summary_service = StockSummaryService(settings, slots=query_slots)
+    market_daily_bars_service = MarketDailyBarsService(settings)
+    adjustment_factors_batch_service = ParquetBatchService(
+        settings,
+        root=settings.adj_factors_root,
+        dataset_name="adj_factors",
+        data_label="复权因子",
+    )
+    trading_status_batch_service = ParquetBatchService(
+        settings,
+        root=settings.trading_status_root,
+        dataset_name="trading_status",
+        data_label="交易状态",
+    )
     app.state.settings = settings
     app.state.kline_service = service
     app.state.adjustment_factor_service = factor_service
@@ -378,6 +543,42 @@ def create_app(settings: ProxySettings) -> FastAPI:
     app.state.five_minute_kline_service = five_minute_kline_service
     app.state.weekly_kline_service = weekly_kline_service
     app.state.monthly_kline_service = monthly_kline_service
+    app.state.stock_summary_service = stock_summary_service
+    app.state.market_daily_bars_service = market_daily_bars_service
+    app.state.adjustment_factors_batch_service = adjustment_factors_batch_service
+    app.state.trading_status_batch_service = trading_status_batch_service
+
+    def batch_archive_response(
+        service: ParquetBatchService,
+        *,
+        start: date,
+        end: date,
+        filename_prefix: str,
+        unavailable_detail: str,
+    ) -> StreamingResponse:
+        if start > end:
+            raise HTTPException(422, "start 不能晚于 end")
+        try:
+            archive = service.open_archive(start=start, end=end)
+        except NoBatchParquetFiles as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except LakeUnavailable as exc:
+            raise HTTPException(503, unavailable_detail) from exc
+        except QueryFailed as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+        filename = f"{filename_prefix}-{start.isoformat()}-{end.isoformat()}.tar"
+        return StreamingResponse(
+            archive.iter_bytes(),
+            media_type="application/x-tar",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+                "X-Cache": "BYPASS",
+                "X-CNEQUITY-Data-Files": str(archive.file_count),
+                "X-CNEQUITY-Data-Bytes": str(archive.data_bytes),
+            },
+        )
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
@@ -450,6 +651,26 @@ def create_app(settings: ProxySettings) -> FastAPI:
         )
 
     @app.get(
+        "/v1/trading-status/batch",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "content": {"application/x-tar": {}},
+                "description": "原始全市场交易状态 Parquet 的流式 TAR 归档。",
+            }
+        },
+    )
+    def market_trading_status_batch(start: date, end: date) -> StreamingResponse:
+        """流式下载所选窗口重叠月份的原始全市场交易状态 Parquet。"""
+        return batch_archive_response(
+            trading_status_batch_service,
+            start=start,
+            end=end,
+            filename_prefix="cnequity-trading-status",
+            unavailable_detail="交易状态数据湖暂不可用",
+        )
+
+    @app.get(
         "/v1/trading-status/{symbol}",
         response_model=TradingStatusPageResponse,
     )
@@ -505,6 +726,79 @@ def create_app(settings: ProxySettings) -> FastAPI:
             end=resolved_end,
             statuses=[TradingStatusRecordResponse(**item.__dict__) for item in page.statuses],
             next_cursor=page.next_cursor,
+        )
+
+    @app.get(
+        "/v1/stocks/{symbol}/summary",
+        response_model=StockSummaryResponse,
+    )
+    def stock_summary(symbol: str, response: Response) -> StockSummaryResponse:
+        normalized_symbol = _normalize_symbol(symbol)
+        try:
+            summary, cache_hit = stock_summary_service.query(symbol=normalized_symbol)
+        except InstrumentNotFound as exc:
+            raise HTTPException(404, "证券主数据中不存在该代码") from exc
+        except QueryBusy as exc:
+            raise HTTPException(429, str(exc), headers={"Retry-After": "1"}) from exc
+        except QueryTooWide as exc:
+            raise HTTPException(413, str(exc)) from exc
+        except LakeUnavailable as exc:
+            raise HTTPException(503, "股票摘要所需证券主数据暂不可用") from exc
+        except QueryFailed as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+        response.headers["X-Cache"] = "HIT" if cache_hit else "MISS"
+        response.headers["Cache-Control"] = (
+            "no-store"
+            if settings.cache_ttl_seconds == 0
+            else f"private, max-age={int(settings.cache_ttl_seconds)}"
+        )
+        return StockSummaryResponse.model_validate(
+            {
+                "symbol": summary.symbol,
+                "instrument": asdict(summary.instrument),
+                "market": {
+                    "latest_market": asdict(summary.daily_bar) if summary.daily_bar else None,
+                    "trading_status": asdict(summary.trading_status)
+                    if summary.trading_status
+                    else None,
+                    "valuation": asdict(summary.valuation) if summary.valuation else None,
+                },
+                "classification": {
+                    "industries": [asdict(item) for item in summary.industries],
+                    "sectors": [asdict(item) for item in summary.sectors],
+                    "index_memberships": [asdict(item) for item in summary.index_memberships],
+                },
+                "signals": {
+                    "fund_flow": asdict(summary.fund_flow) if summary.fund_flow else None,
+                    "analyst_consensus": asdict(summary.analyst_consensus)
+                    if summary.analyst_consensus
+                    else None,
+                    "hot_rank": asdict(summary.hot_rank) if summary.hot_rank else None,
+                    "sentiments": [asdict(item) for item in summary.sentiments],
+                },
+                "unavailable_datasets": list(summary.unavailable_datasets),
+            }
+        )
+
+    @app.get(
+        "/v1/kline/batch",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "content": {"application/x-tar": {}},
+                "description": "原始全市场日线 Parquet 的流式 TAR 归档。",
+            }
+        },
+    )
+    def market_daily_bars_batch(start: date, end: date) -> StreamingResponse:
+        """流式下载所选日期窗口内原始、未复权的全市场日线 Parquet。"""
+        return batch_archive_response(
+            market_daily_bars_service,
+            start=start,
+            end=end,
+            filename_prefix="cnequity-daily-bars",
+            unavailable_detail="日 K 数据湖暂不可用",
         )
 
     @app.get(
@@ -679,6 +973,26 @@ def create_app(settings: ProxySettings) -> FastAPI:
             base_date=page.base_date,
             base_factor_date=page.base_factor_date,
             next_cursor=page.next_cursor,
+        )
+
+    @app.get(
+        "/v1/adjustment-factors/batch",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "content": {"application/x-tar": {}},
+                "description": "原始全市场后复权因子 Parquet 的流式 TAR 归档。",
+            }
+        },
+    )
+    def market_adjustment_factors_batch(start: date, end: date) -> StreamingResponse:
+        """流式下载所选窗口内原始全市场后复权因子 Parquet。"""
+        return batch_archive_response(
+            adjustment_factors_batch_service,
+            start=start,
+            end=end,
+            filename_prefix="cnequity-adjustment-factors",
+            unavailable_detail="复权因子数据湖暂不可用",
         )
 
     @app.get(

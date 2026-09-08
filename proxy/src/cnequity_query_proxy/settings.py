@@ -53,8 +53,8 @@ class ProxySettings:
     default_limit: int = 1000
     max_bars: int = 5000
     max_files: int = 6000
-    cache_ttl_seconds: float = 15.0
-    cache_entries: int = 256
+    cache_ttl_seconds: float = 60.0
+    cache_entries: int = 512
     max_concurrent_queries: int = 4
     duckdb_threads: int = 1
 
@@ -75,7 +75,10 @@ class ProxySettings:
             raise SettingsError("默认每页条数必须介于 1 和最大条数之间")
         if (
             min(
-                self.max_files, self.cache_entries, self.max_concurrent_queries, self.duckdb_threads
+                self.max_files,
+                self.cache_entries,
+                self.max_concurrent_queries,
+                self.duckdb_threads,
             )
             < 1
         ):
@@ -98,6 +101,38 @@ class ProxySettings:
     @property
     def trading_status_root(self) -> Path:
         return self.data_root / "curated" / "trading_status"
+
+    @property
+    def valuation_metrics_root(self) -> Path:
+        return self.data_root / "curated" / "valuation_metrics"
+
+    @property
+    def industry_members_root(self) -> Path:
+        return self.data_root / "curated" / "industry_members"
+
+    @property
+    def sector_members_root(self) -> Path:
+        return self.data_root / "curated" / "sector_members"
+
+    @property
+    def index_constituents_root(self) -> Path:
+        return self.data_root / "curated" / "index_constituents"
+
+    @property
+    def fund_flow_root(self) -> Path:
+        return self.data_root / "curated" / "fund_flow"
+
+    @property
+    def analyst_consensus_root(self) -> Path:
+        return self.data_root / "curated" / "analyst_consensus"
+
+    @property
+    def hot_rank_root(self) -> Path:
+        return self.data_root / "curated" / "hot_rank"
+
+    @property
+    def sentiment_scores_root(self) -> Path:
+        return self.data_root / "curated" / "sentiment_scores"
 
     def intraday_bars_root(self, interval: Literal["1m", "5m"]) -> Path:
         """返回指定日内周期独立的 Parquet 根目录。"""
@@ -143,9 +178,9 @@ class ProxySettings:
             max_bars=_positive_int("CNEQUITY_PROXY_MAX_BARS", 5000, maximum=100_000),
             max_files=_positive_int("CNEQUITY_PROXY_MAX_FILES", 6000, maximum=100_000),
             cache_ttl_seconds=_non_negative_float(
-                "CNEQUITY_PROXY_CACHE_TTL_SECONDS", 15.0, maximum=3600.0
+                "CNEQUITY_PROXY_CACHE_TTL_SECONDS", 60.0, maximum=3600.0
             ),
-            cache_entries=_positive_int("CNEQUITY_PROXY_CACHE_ENTRIES", 256, maximum=100_000),
+            cache_entries=_positive_int("CNEQUITY_PROXY_CACHE_ENTRIES", 512, maximum=100_000),
             max_concurrent_queries=_positive_int(
                 "CNEQUITY_PROXY_MAX_CONCURRENT_QUERIES", 4, maximum=1024
             ),

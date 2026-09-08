@@ -1,6 +1,6 @@
 # CNEquity Query Proxy API
 
-版本：`v1`。这是一个独立、只读的 HTTP/JSON 服务，只读取本地 Parquet 数据湖中的下列
+版本：`v1`。这是一个独立、只读的 HTTP 服务，只读取本地 Parquet 数据湖中的下列
 目录，不导入 `cnequity` 主包，也不读取其配置、元数据或数据库：
 
 ```text
@@ -9,11 +9,22 @@
 {CNEQUITY_PROXY_DATA_ROOT}/curated/minute_bars_5m/trade_date=YYYY-MM-DD/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/trading_status/trade_date=YYYY-MM/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/instruments/part-merged.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/valuation_metrics/trade_date=YYYY-MM-DD/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/industry_members/as_of_date=YYYY-MM-DD/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/sector_members/as_of_date=YYYY-MM-DD/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/index_constituents/as_of_date=YYYY-MM/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/fund_flow/trade_date=YYYY-MM-DD/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/analyst_consensus/forecast_date=YYYY-MM-DD/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/hot_rank/trade_date=YYYY-MM/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/sentiment_scores/trade_date=YYYY-MM/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/derived/adj_factors/trade_date=YYYY-MM-DD/*.parquet
 ```
 
 生产环境请通过 HTTPS 反向代理公开服务。默认监听 `127.0.0.1:8790`，交互式 OpenAPI
 文档位于 `/docs`，机器可读规范位于 `/openapi.json`。
+
+Python 调用方可使用独立的 [CNEquity Query SDK](../../sdk/README.md)，获取与本文相同的类型化
+查询能力，而无需直接处理 JSON、分页游标或 HTTP 状态码。
 
 ## 通用约定
 
@@ -22,15 +33,17 @@
   响应统一使用大写。
 - K 线、复权因子与交易状态按时间正序返回；证券列表按 `symbol` 升序返回。`cursor` 是上一页的
   `next_cursor`；将它原样传回即可读取后续数据。
-- `1d`、`1w`、`1mo` 与交易状态省略 `start` 和 `end` 时，结束日为服务端当天，开始日为结束日前
-  `CNEQUITY_PROXY_DEFAULT_WINDOW_DAYS` 个自然日，默认 365 天；单次窗口受
-  `CNEQUITY_PROXY_MAX_WINDOW_DAYS` 限制，默认 3660 天。
+- `1d`、`1w`、`1mo` 与交易状态 JSON 查询省略 `start` 和 `end` 时，结束日为服务端当天，开始日为
+  结束日前 `CNEQUITY_PROXY_DEFAULT_WINDOW_DAYS` 个自然日，默认 365 天；单次窗口受
+  `CNEQUITY_PROXY_MAX_WINDOW_DAYS` 限制，默认 3660 天。全市场批量下载必须传入日期，且不受该
+  窗口上限限制。
 - `1m` 默认窗口为 `CNEQUITY_PROXY_DEFAULT_MINUTE_WINDOW_DAYS`（默认 5 天），最大为
   `CNEQUITY_PROXY_MAX_MINUTE_WINDOW_DAYS`（默认 31 天）。`5m` 分别使用
   `CNEQUITY_PROXY_DEFAULT_5M_WINDOW_DAYS`（默认 20 天）和
   `CNEQUITY_PROXY_MAX_5M_WINDOW_DAYS`（默认 90 天）。
 - 单页 `limit` 默认 1000，最大 5000，实际值可由运行配置调整。
-- 所有业务端点响应 `application/json`。没有写入、更新或删除接口。
+- 除全市场日线、复权因子与交易状态批量下载外，业务端点响应 `application/json`。批量下载响应
+  `application/x-tar`，其中是原始 Parquet 文件。没有写入、更新或删除接口。
 
 ## 认证与缓存
 
@@ -45,8 +58,8 @@ Authorization: Bearer <CNEQUITY_PROXY_API_KEY>
 
 | 响应头 | 含义 |
 | --- | --- |
-| `X-Cache: HIT` / `MISS` | 是否命中代理进程内 TTL LRU 缓存 |
-| `Cache-Control` | 缓存启用时为 `private, max-age=<TTL>`；TTL 为 0 时为 `no-store` |
+| `X-Cache: HIT` / `MISS` / `BYPASS` | 是否命中代理进程内 TTL LRU 缓存；批量下载恒为 `BYPASS` |
+| `Cache-Control` | JSON 查询在缓存启用时为 `private, max-age=<TTL>`；批量下载与 TTL 为 0 的查询均为 `no-store` |
 
 ## 路由清单
 
@@ -56,8 +69,12 @@ Authorization: Bearer <CNEQUITY_PROXY_API_KEY>
 | --- | --- | --- |
 | `GET /healthz` | 否 | 服务存活探针 |
 | `GET /v1/instruments` | 是（配置 Key 时） | 查询证券基础信息与代码 |
+| `GET /v1/trading-status/batch` | 是（配置 Key 时） | 流式下载全市场原始交易状态 Parquet |
 | `GET /v1/trading-status/{symbol}` | 是（配置 Key 时） | 查询证券每日交易状态与风险警示 |
+| `GET /v1/stocks/{symbol}/summary` | 是（配置 Key 时） | 查询单只证券的轻量当前摘要 |
+| `GET /v1/kline/batch` | 是（配置 Key 时） | 流式下载全市场原始日线 Parquet |
 | `GET /v1/kline/{symbol}` | 是（配置 Key 时） | 查询原始、前复权或后复权的日、日内、周、月 K |
+| `GET /v1/adjustment-factors/batch` | 是（配置 Key 时） | 流式下载全市场原始后复权因子 Parquet |
 | `GET /v1/adjustment-factors/{symbol}` | 是（配置 Key 时） | 查询前复权或后复权因子 |
 
 ## 健康检查
@@ -132,6 +149,27 @@ curl -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
 
 ## 交易状态
 
+### `GET /v1/trading-status/batch`
+
+一次下载给定日期窗口重叠月份的全市场 `trading_status` 原始 Parquet 文件。该接口不使用
+DuckDB，不转成 JSON，不做代码筛选、字段投影或状态推断；服务只选择已有的
+`curated/trading_status/trade_date=YYYY-MM/*.parquet` 文件，并以流式 TAR 返回。
+
+| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `start` | query | date | 是 | - | 闭区间开始日，用于选择重叠月分区 |
+| `end` | query | date | 是 | - | 闭区间结束日，用于选择重叠月分区 |
+
+`trading_status` 的物理分区是月，不是日。因此例如请求一天也会下载该日所在的**整月**原始
+Parquet；客户端应在解压后按文件内的日级 `trade_date` 列做精确过滤。这个边界是刻意保留原始
+文件、避免服务端重编码的结果。
+
+```bash
+curl -L -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
+  "https://proxy.example/v1/trading-status/batch?start=2025-01-01&end=2025-12-31" \
+  --output cnequity-trading-status-2025.tar
+```
+
 ### `GET /v1/trading-status/{symbol}`
 
 查询证券在本地数据湖中已有的每日交易状态。服务只读取与窗口重叠的
@@ -189,6 +227,150 @@ curl -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
   ],
   "next_cursor": null
 }
+```
+
+## 单股摘要
+
+### `GET /v1/stocks/{symbol}/summary`
+
+一次返回单只证券的轻量当前事实，适合股票详情页或研究 agent 的首屏上下文。服务首先校验
+`curated/instruments/part-merged.parquet` 中存在该证券，再只打开每个白名单数据集的**最新分区**；
+不会回扫旧分区寻找历史记录，也不会联网补数。
+
+| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `symbol` | path | string | 是 | - | 股票或北交所代码，见通用约定 |
+
+响应分为以下轻量模块：
+
+| 模块 | 内容 |
+| --- | --- |
+| `instrument` | 证券主数据及其溯源 |
+| `market` | 最新可用日级行情快照、交易状态、估值 |
+| `classification` | 当前行业、东财板块、指数成分归属 |
+| `signals` | 资金流、分析师一致预期、人气榜、情绪分数 |
+
+每条已返回事实都带自己的日期字段、`source`、`data_version` 和 UTC `fetched_at`；模块间的日期
+不保证相同。某数据集目录不存在或尚无 Parquet 文件时，对应值为 `null` 或空数组，且其名称会列入
+`unavailable_datasets`。一个可用数据集内没有该证券的行只表示当前分区没有该事实，不会被当作零值
+或正常状态。
+
+`index_memberships[].weight` 在数据源未提供权重时为 `null`。当前入湖的成分源会以 `0` 作为内部
+占位，因此接口特意不把它暴露为“零权重”。
+
+`market.latest_market` 最多返回一条最新可用日级 OHLCV 行情快照；它不是 K 线序列，也不承诺
+实时盘口语义。日/分钟 K 历史和复权结果应使用 `/v1/kline/{symbol}`。
+
+摘要刻意不包含日/分钟 K 历史、复权因子历史、财报长表、股东明细、公告新闻事件流，以及
+`industry_index`、`sector_bars`。这些数据具有较大的历史体量或不能安全地按现有编码直接关联，
+应使用专门的明细接口。
+
+请求示例：
+
+```bash
+curl -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
+  "https://proxy.example/v1/stocks/600519.SH/summary"
+```
+
+成功响应示例：
+
+```json
+{
+  "symbol": "600519.SH",
+  "instrument": {
+    "symbol": "600519.SH",
+    "name": "贵州茅台",
+    "exchange": "SH",
+    "asset_type": "stock",
+    "list_date": "2001-08-27",
+    "delist_date": null,
+    "prev_symbol": null,
+    "provenance": {
+      "source": "eastmoney",
+      "data_version": "v1",
+      "fetched_at": "2026-09-07T09:10:00Z"
+    }
+  },
+  "market": {
+    "latest_market": {
+      "trade_date": "2026-09-04",
+      "open": 1420.0,
+      "high": 1442.0,
+      "low": 1417.0,
+      "close": 1436.0,
+      "volume": 2134567,
+      "amount": 3065000000.0,
+      "provenance": {
+        "source": "tdx_protocol",
+        "data_version": "v2",
+        "fetched_at": "2026-09-04T07:10:00Z"
+      }
+    },
+    "trading_status": null,
+    "valuation": null
+  },
+  "classification": {
+    "industries": [],
+    "sectors": [],
+    "index_memberships": [
+      {
+        "index_symbol": "000300.SH",
+        "as_of_date": "2026-09-07",
+        "weight": null,
+        "provenance": {
+          "source": "eastmoney",
+          "data_version": "v1",
+          "fetched_at": "2026-09-07T09:10:00Z"
+        }
+      }
+    ]
+  },
+  "signals": {
+    "fund_flow": null,
+    "analyst_consensus": null,
+    "hot_rank": null,
+    "sentiments": []
+  },
+  "unavailable_datasets": []
+}
+```
+
+## 全市场批量 Parquet 下载
+
+批量接口面向本地研究湖同步，而非行级 JSON 查询：服务只按分区目录选择白名单数据集中的原始
+Parquet 文件，并以流式 TAR 返回。它们不使用 DuckDB，不做代码筛选、复权、重采样或字段投影；
+归档内保留从数据湖根目录开始的相对路径，因此可直接解压到另一个数据湖根目录。
+
+成功响应的 `Content-Type` 为 `application/x-tar`，并带有：
+
+| 响应头 | 含义 |
+| --- | --- |
+| `Content-Disposition` | 建议的 `.tar` 文件名 |
+| `X-CNEQUITY-Data-Files` | 归档中原始 Parquet 文件数 |
+| `X-CNEQUITY-Data-Bytes` | 原始 Parquet 字节总数，不含 TAR 容器开销 |
+
+三个批量接口不进入结果缓存，也不占用普通查询的并发扫描额度。代理不对它们施加日期跨度、文件数、
+原始字节数或并发下载额度；只校验 `start <= end`，并流式返回实际存在的白名单分区。
+
+### `GET /v1/kline/batch`
+
+一次下载给定日期窗口内的全市场 `daily_bars` 原始 Parquet 文件，适合数百个交易日的研究数据拉取。
+服务只选择已有的 `curated/daily_bars/trade_date=.../*.parquet` 日分区；日线是未复权的原始价格。
+
+| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `start` | query | date | 是 | - | 闭区间开始日 |
+| `end` | query | date | 是 | - | 闭区间结束日 |
+
+示例：
+
+```bash
+curl -L -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
+  "https://proxy.example/v1/kline/batch?start=2025-01-01&end=2025-12-31" \
+  --output cnequity-daily-bars-2025.tar
+
+tar -tf cnequity-daily-bars-2025.tar
+tar -xf cnequity-daily-bars-2025.tar -C /research/lake
 ```
 
 ## K 线
@@ -324,6 +506,27 @@ curl -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
 
 ## 复权因子
 
+### `GET /v1/adjustment-factors/batch`
+
+一次下载给定日期窗口内的全市场 `adj_factors` 原始 Parquet 文件。服务只选择已有的
+`derived/adj_factors/trade_date=YYYY-MM-DD/*.parquet` 日分区；归档中的因子是湖内持久化的
+后复权因子 `hfq`，不会在服务端按 `base_date` 计算前复权因子。
+
+| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `start` | query | date | 是 | - | 闭区间开始日 |
+| `end` | query | date | 是 | - | 闭区间结束日 |
+
+研究端把该归档与同窗口的 `/v1/kline/batch` 日线按 `(symbol, trade_date)` 关联：后复权价格为
+`P_raw(t) * F_hfq(t)`；以前复权基准日 `b` 为准时，使用 `P_raw(t) * F_hfq(t) / F_hfq(b)`。
+这样基准日和复权结果属于研究输入，而不是服务端不可追溯的批量派生结果。
+
+```bash
+curl -L -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
+  "https://proxy.example/v1/adjustment-factors/batch?start=2025-01-01&end=2025-12-31" \
+  --output cnequity-adjustment-factors-2025.tar
+```
+
 ### `GET /v1/adjustment-factors/{symbol}`
 
 查询可直接乘到原始 OHLC 的复权因子。`hfq` 返回数据湖中持久化的累计因子；`qfq` 在服务端
@@ -414,18 +617,22 @@ GET /v1/trading-status/600519.SH?start=2025-01-01&end=2025-12-31&status=suspende
 | 状态码 | 场景 |
 | --- | --- |
 | `401` | API Key 已配置但未携带或携带了错误的 Bearer Token |
+| `404` | 单股摘要请求的证券不在证券主数据中，或任一批量接口的窗口没有可下载的 Parquet 文件 |
 | `409` | 严格 K 线复权缺因子，或前复权因子的基准日因子不存在 |
-| `413` | 本次查询需打开的 Parquet 文件数超过 `CNEQUITY_PROXY_MAX_FILES` |
+| `413` | 非批量查询需打开的 Parquet 文件数超过 `CNEQUITY_PROXY_MAX_FILES` |
 | `422` | 代码、日期、窗口、游标、页大小、证券筛选或复权参数不合法 |
-| `429` | 未命中缓存的扫描数超过 `CNEQUITY_PROXY_MAX_CONCURRENT_QUERIES`；含 `Retry-After: 1` |
+| `429` | 未命中缓存的普通查询扫描数超过 `CNEQUITY_PROXY_MAX_CONCURRENT_QUERIES`；含 `Retry-After: 1` |
 | `503` | 所需本地数据湖目录或证券主文件不存在、文件正在切换或当前不可读 |
 
 ## 数据与性能边界
 
 - 日 K、周/月聚合、日内 K、复权因子与交易状态均先按 `trade_date=` 目录剪裁文件；交易状态按月分区，其他时序数据按日分区。证券主数据只打开固定 canonical 文件，均不递归扫描整个数据湖。
+- 单股摘要只读取列出的十个轻量数据集的最新分区并共用一次磁盘查询额度；不会读取 `minute_bars`、`minute_bars_5m` 或任何历史长表分区。
+- 全市场日线、后复权因子和交易状态批量下载直接逐块读取原始 Parquet，不做 DuckDB 扫描，也不在
+  内存中聚合全市场行。三者不使用普通查询额度，也没有代理层的日期、文件、字节或并发下载配额。
 - `1m` 与 `5m` 分别使用独立的短窗口上限和数据目录；周/月聚合复用日 K 的窗口及文件预算，并在 DuckDB 内以单次扫描完成逐日复权和聚合。
 - SQL 只读取接口需要的列，且使用参数化查询。
-- 全部 K 线、复权因子、交易状态与证券主数据共享未命中缓存的并发扫描额度，避免并发请求拖慢采集任务。
+- 全部 K 线、复权因子、交易状态、证券主数据与单股摘要共享未命中缓存的并发扫描额度，避免并发请求拖慢采集任务。
 - 查询结果和分区索引均使用进程内 TTL 缓存；代理绝不向数据湖写入缓存或其他文件。
 
 ## 接口变更维护

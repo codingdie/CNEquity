@@ -43,10 +43,18 @@ def _parse_partition(value: str) -> tuple[date, date] | None:
 class PartitionIndex:
     """短 TTL 的分区目录索引；只缓存路径，绝不写入数据湖。"""
 
-    def __init__(self, root: Path, *, ttl_seconds: float, dataset_name: str):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        ttl_seconds: float,
+        dataset_name: str,
+        partition_key: str = "trade_date",
+    ):
         self._root = root
         self._ttl_seconds = ttl_seconds
         self._dataset_name = dataset_name
+        self._partition_key = partition_key
         self._lock = threading.Lock()
         self._entries: tuple[PartitionFiles, ...] = ()
         self._root_files: tuple[Path, ...] = ()
@@ -65,6 +73,14 @@ class PartitionIndex:
                 files.extend(entry.files)
         return files
 
+    def latest_files(self) -> list[Path]:
+        """返回最新分区的文件，绝不为摘要递归扫描历史分区。"""
+        entries, root_files = self._snapshot()
+        if entries:
+            latest = max(entries, key=lambda entry: (entry.end, entry.start))
+            return list(latest.files)
+        return list(root_files)
+
     def _snapshot(self) -> tuple[tuple[PartitionFiles, ...], tuple[Path, ...]]:
         if not self._root.is_dir():
             raise FileNotFoundError(f"{self._dataset_name} 目录不存在: {self._root}")
@@ -77,9 +93,10 @@ class PartitionIndex:
 
             entries: list[PartitionFiles] = []
             for child in self._root.iterdir():
-                if not child.is_dir() or not child.name.startswith("trade_date="):
+                prefix = f"{self._partition_key}="
+                if not child.is_dir() or not child.name.startswith(prefix):
                     continue
-                bounds = _parse_partition(child.name.removeprefix("trade_date="))
+                bounds = _parse_partition(child.name.removeprefix(prefix))
                 if bounds is None:
                     continue
                 files = tuple(sorted(child.glob("*.parquet")))

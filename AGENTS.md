@@ -62,6 +62,7 @@ rebase、merge、reset 或任何其他会改变其状态的 Git 操作。需要�
 | `src/cnequity/query/` | 只读 Python/DuckDB 查询契约。 |
 | `src/cnequity/serve/` | 只读本地 dashboard。 |
 | `proxy/` | 独立只读 HTTP proxy；不得导入 `cnequity` 或写入数据湖。 |
+| `sdk/` | 独立安装的 Query Proxy Python SDK；只通过 HTTP 查询，不导入服务端或数据湖。 |
 | `tests/` | 主包测试；单元测试默认离线。 |
 | `proxy/tests/` | 独立 proxy 测试套件。 |
 | `docs/adr/` | 持久的非平凡架构取舍。 |
