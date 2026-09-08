@@ -102,6 +102,51 @@ def _derive_trading_status(cfg, *, start: date | None, end: date | None) -> dict
     return summary
 
 
+def _derive_industry_index(
+    cfg,
+    *,
+    start: date | None,
+    end: date | None,
+    full: bool,
+) -> dict:
+    """Run industry-index derivation through its COW publication step."""
+    engine = JobEngine(cfg)
+    trade_date = shanghai_today()
+    run_id = engine.manifest.start_run(
+        "derive_industry_index",
+        {
+            "trade_date": trade_date.isoformat(),
+            "derive_start": start.isoformat() if start else None,
+            "derive_end": end.isoformat() if end else None,
+            "derive_full": full,
+        },
+    )
+    context = {"derive_start": start, "derive_end": end, "derive_full": full}
+    try:
+        derived = engine.run_step("derive_industry_index", trade_date, run_id, context)
+    except Exception as exc:
+        engine.manifest.finish_run(run_id, "failed", error_message=str(exc))
+        raise
+
+    step_status = str(derived.get("status", "success"))
+    engine.manifest.finish_run(
+        run_id,
+        step_status,
+        rows_read=int(derived.get("rows_read", 0) or 0),
+        rows_written=int(derived.get("rows_written", 0) or 0),
+        error_message=derived.get("error") if step_status == "failed" else None,
+    )
+    persisted = engine.manifest.get_run(run_id)
+    summary = {
+        "run_id": run_id,
+        "status": str(persisted["status"]) if persisted is not None else step_status,
+        "rows": int(derived.get("rows_written", 0) or 0),
+    }
+    if revision := derived.get("dataset_revision"):
+        summary["dataset_revision"] = revision
+    return summary
+
+
 @cli.command()
 @click.argument("name", default="adj_factors")
 @config_option
@@ -140,10 +185,11 @@ def derive(name: str, config_path: str, full: bool, start_str: str | None, end_s
                 err=True,
             )
     elif name == "industry_index":
-        from cnequity.derive.industry_index import derive_industry_index
-
-        summary = derive_industry_index(cfg, start=start, end=end, full=full)
+        summary = _derive_industry_index(cfg, start=start, end=end, full=full)
         click.echo(json.dumps(summary, indent=2, default=str))
+        exit_code = _run_status_exit_code(str(summary.get("status", "failed")))
+        if exit_code:
+            raise SystemExit(exit_code)
     elif name == "trading_status":
         summary = _derive_trading_status(cfg, start=start, end=end)
         click.echo(json.dumps(summary, indent=2, default=str))

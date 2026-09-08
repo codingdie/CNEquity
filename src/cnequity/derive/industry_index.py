@@ -343,6 +343,7 @@ def derive_industry_index(
     start: date | None = None,
     end: date | None = None,
     full: bool = False,
+    sync_watermark: bool = True,
 ) -> dict:
     """Compute and write ``industry_index``, partitioned by year.
 
@@ -356,7 +357,31 @@ def derive_industry_index(
     # This derive merges existing yearly partitions and must share compact's
     # mutation lock with other curated/derived writers.
     with lake_mutation_lock(config.meta_root, blocking=True):
-        return _derive_industry_index_locked(config, start=start, end=end, full=full)
+        return _derive_industry_index_locked(
+            config,
+            start=start,
+            end=end,
+            full=full,
+            sync_watermark=sync_watermark,
+        )
+
+
+def sync_industry_index_watermark(config: Config) -> date | None:
+    """Synchronize the watermark from the revision currently visible to readers.
+
+    ``industry_index`` has a structural completeness check, so its incremental
+    watermark must stop before an interior session gap.  Query scans resolve
+    ``current.json`` first; callers that publish a COW revision must therefore
+    invoke this only after the pointer has moved to the candidate generation.
+    """
+    from cnequity.domain.datasets import DATASETS
+    from cnequity.quality.verify import last_contiguous_dense_date
+    from cnequity.storage.state import StateStore
+
+    safe_watermark = last_contiguous_dense_date(config, DATASETS["industry_index"])
+    if safe_watermark is not None:
+        StateStore(config.meta_root).set_date("industry_index", safe_watermark)
+    return safe_watermark
 
 
 def _derive_industry_index_locked(
@@ -365,11 +390,10 @@ def _derive_industry_index_locked(
     start: date | None = None,
     end: date | None = None,
     full: bool = False,
+    sync_watermark: bool = True,
 ) -> dict:
     """Implementation of :func:`derive_industry_index` under the mutation lock."""
-    from cnequity.domain.datasets import DATASETS
     from cnequity.domain.schemas import with_provenance
-    from cnequity.quality.verify import last_contiguous_dense_date
     from cnequity.storage.parquet import CuratedWriter
     from cnequity.storage.state import StateStore
 
@@ -434,13 +458,8 @@ def _derive_industry_index_locked(
             )
         writer.write_partition("industry_index", "trade_date", str(year), group, "part-000.parquet")
         written += group.height
-    # This derive writes directly to the derived tree instead of going through
-    # the generic compact step. Do not advance past an interior session gap:
-    # the next incremental run starts at watermark + 1, so a raw max would make
-    # a missing day permanently invisible.
-    safe_watermark = last_contiguous_dense_date(config, DATASETS["industry_index"])
-    if safe_watermark is not None:
-        state.set_date("industry_index", safe_watermark)
+    if sync_watermark:
+        sync_industry_index_watermark(config)
     return {
         "rows": frame.height,
         "rows_on_disk": written,

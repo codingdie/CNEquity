@@ -604,7 +604,10 @@ def test_derive_adj_factors(cfg_path, monkeypatch):
 def test_derive_industry_index(cfg_path, monkeypatch):
     monkeypatch.setattr(
         "cnequity.derive.industry_index.derive_industry_index",
-        lambda cfg, full=False, start=None, end=None: {"rows": 3, "note": "ok"},
+        lambda cfg, full=False, start=None, end=None, sync_watermark=True: {
+            "rows": 3,
+            "note": "ok",
+        },
     )
     result = CliRunner().invoke(cli, ["derive", "industry_index", "--config", cfg_path])
     assert result.exit_code == 0, result.output

@@ -754,7 +754,10 @@ def step_derive_adj_factors(config: Config, trade_date: date, run_id: str, conte
 def step_derive_industry_index(
     config: Config, trade_date: date, run_id: str, context: dict
 ) -> dict:
-    from cnequity.derive.industry_index import derive_industry_index
+    from cnequity.derive.industry_index import (
+        derive_industry_index,
+        sync_industry_index_watermark,
+    )
     from cnequity.storage.revisions import RevisionStore
 
     derived_revisions = RevisionStore(
@@ -766,7 +769,13 @@ def step_derive_industry_index(
         derived_revisions.ensure_current("industry_index")
         derived_revisions.materialize_current("industry_index")
         before_files = _layer_file_identity(config.derived_root / "industry_index")
-        summary = derive_industry_index(config)
+        summary = derive_industry_index(
+            config,
+            start=context.get("derive_start"),
+            end=context.get("derive_end"),
+            full=bool(context.get("derive_full")),
+            sync_watermark=False,
+        )
         published_revision = _publish_derived_revision(
             config,
             "industry_index",
@@ -774,6 +783,10 @@ def step_derive_industry_index(
             trade_date,
             before_files,
         )
+        # Query readers resolve the immutable pointer, not the mutable writer
+        # tree.  Advance the dense-coverage watermark only after publication
+        # so it reflects the generation clients can actually read.
+        sync_industry_index_watermark(config)
     except Exception as exc:
         _record_dataset_result(
             config,
