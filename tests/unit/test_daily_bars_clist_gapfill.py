@@ -1054,9 +1054,10 @@ def test_multiday_etf_sina_empty_allows_compact_with_source_unavailable_finding(
 
 
 @pytest.mark.parametrize(
-    "outcome", ["eastmoney_rows", "sina_rows", "empty", "error", "disabled", "cached_empty"]
+    "outcome",
+    ["eastmoney_rows", "sina_rows", "sina_empty", "error", "disabled", "cached_empty"],
 )
-def test_multiday_non_trading_tip_requires_terminal_evidence(tmp_path, monkeypatch, outcome):
+def test_multiday_non_trading_gap_requires_sina_terminal_evidence(tmp_path, monkeypatch, outcome):
     from cnequity.steps.common import load_negative_evidence, record_negative_evidence
 
     cfg = _cfg(tmp_path)
@@ -1091,7 +1092,7 @@ def test_multiday_non_trading_tip_requires_terminal_evidence(tmp_path, monkeypat
         )
     calls = []
 
-    def eastmoney(requested, s, e, **kwargs):
+    def eastmoney(requested, s, e, **_kwargs):
         calls.append(("eastmoney", tuple(requested), s, e))
         assert s == e == end
         return _bar_frame(requested, end) if outcome == "eastmoney_rows" else pl.DataFrame()
@@ -1099,7 +1100,7 @@ def test_multiday_non_trading_tip_requires_terminal_evidence(tmp_path, monkeypat
     def sina(symbol, *, start, end, **kwargs):
         calls.append(("sina", symbol, start, end))
         assert start == end == date(2024, 6, 21)
-        if outcome == "error":
+        if outcome in {"error", "cached_empty"}:
             raise RuntimeError("source unavailable")
         return _bar_frame([symbol], end) if outcome == "sina_rows" else pl.DataFrame()
 
@@ -1119,7 +1120,7 @@ def test_multiday_non_trading_tip_requires_terminal_evidence(tmp_path, monkeypat
             sina_result=None,
         )
 
-    if outcome in {"empty", "error", "disabled", "cached_empty"}:
+    if outcome in {"error", "disabled", "cached_empty"}:
         with pytest.raises(RuntimeError, match="non-trading status key.*remain unknown"):
             finish()
         assert manifest.get_batch(run_id, "tdx")["status"] != "success"
@@ -1130,14 +1131,104 @@ def test_multiday_non_trading_tip_requires_terminal_evidence(tmp_path, monkeypat
             assert evidence == []
     else:
         result = finish()
-        assert result["rows_written"] == 8
+        assert result["rows_written"] == (4 if outcome == "sina_empty" else 8)
         assert _staged_daily_bar_symbols(cfg, run_id, start) == set(symbols)
-        assert _staged_daily_bar_symbols(cfg, run_id, end) == set(symbols)
-        assert load_negative_evidence(cfg, "daily_bars") == []
+        if outcome == "sina_empty":
+            assert _staged_daily_bar_symbols(cfg, run_id, end) == set()
+            evidence = load_negative_evidence(cfg, "daily_bars")
+            assert {
+                (
+                    item["symbol"],
+                    item["window_start"],
+                    item["window_end"],
+                    item["reason"],
+                    item["source"],
+                )
+                for item in evidence
+            } == {
+                (
+                    symbol,
+                    end.isoformat(),
+                    end.isoformat(),
+                    "verified_suspension_no_data",
+                    "sina",
+                )
+                for symbol in symbols
+            }
+        else:
+            assert _staged_daily_bar_symbols(cfg, run_id, end) == set(symbols)
+            assert load_negative_evidence(cfg, "daily_bars") == []
     assert calls[0] == ("eastmoney", tuple(symbols), end, end)
     assert sum(call[0] == "sina" for call in calls) == (
         0 if outcome in {"eastmoney_rows", "disabled"} else 4
     )
+
+
+def test_multiday_suspension_sina_empty_resolves_failed_batch(tmp_path, monkeypatch):
+    from cnequity.orchestrator.compact_gate import compact_allowed
+
+    cfg = _cfg(tmp_path)
+    manifest = Manifest(cfg.manifest_path)
+    run_id = manifest.start_run("daily:core")
+    start, end = date(2024, 6, 20), date(2024, 6, 21)
+    symbol = "000016.SZ"
+    StagingWriter(cfg.staging_root).write_batch(
+        "daily_bars", run_id, "tdx", _bar_frame([symbol], start)
+    )
+    manifest.start_batch(
+        run_id,
+        "tdx",
+        "daily_bars",
+        "daily_bars",
+        symbols=[symbol],
+        window_start=start.isoformat(),
+        window_end=end.isoformat(),
+    )
+    manifest.finish_batch(run_id, "tdx", "failed", error_message="TDX omitted suspension")
+    status_root = cfg.curated_root / "trading_status"
+    status_root.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": [symbol, symbol],
+            "trade_date": [start, end],
+            "is_trading": [True, False],
+            "status": ["normal", "suspended"],
+        }
+    ).write_parquet(status_root / "part.parquet")
+
+    def eastmoney(requested, request_start, request_end, **_kwargs):
+        if request_start == request_end == end:
+            return pl.DataFrame()
+        return _bar_frame(requested, start)
+
+    def sina(_config, _symbols, request_start, request_end, _run_id, **_kwargs):
+        return {
+            "rows_read": 0,
+            "rows_written": 0,
+            "empty_symbol_names": [symbol] if request_start == request_end == end else [],
+        }
+
+    monkeypatch.setattr("cnequity.adapters.eastmoney.bars.fetch_daily_bars", eastmoney)
+    monkeypatch.setattr("cnequity.steps.bars.fetch_bars_via_sina", sina)
+
+    _finish_daily_bars(
+        cfg,
+        end,
+        run_id,
+        start=start,
+        end=end,
+        expected_tdx_symbols=[symbol],
+        tdx_result={
+            "rows_read": 1,
+            "rows_written": 1,
+            "had_error": True,
+            "failed_symbols": [symbol],
+        },
+        sina_result=None,
+    )
+
+    assert manifest.get_batch(run_id, "tdx")["status"] == "success"
+    assert compact_allowed(manifest, run_id, "daily_bars") == (True, 0)
 
 
 def test_non_trading_interior_empty_remains_unresolved_with_failed_tip(tmp_path, monkeypatch):
@@ -1184,7 +1275,18 @@ def test_non_trading_interior_empty_remains_unresolved_with_failed_tip(tmp_path,
             sina_result=None,
         )
     assert calls == [(middle, middle), (end, end)]
-    assert load_negative_evidence(cfg, "daily_bars") == []
+    assert {
+        (item["symbol"], item["window_start"], item["window_end"], item["reason"], item["source"])
+        for item in load_negative_evidence(cfg, "daily_bars")
+    } == {
+        (
+            symbol,
+            middle.isoformat(),
+            middle.isoformat(),
+            "verified_suspension_no_data",
+            "sina",
+        )
+    }
 
 
 def test_resolve_recovered_daily_batches_does_not_close_unrelated_failures(tmp_path):

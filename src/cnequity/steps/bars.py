@@ -887,6 +887,7 @@ def _finish_daily_bars(
         sina_findings = (sina_result.get("context_updates") or {}).get("audit_findings") or []
         findings.extend(sina_findings)
 
+    verified_suspension_keys: set[tuple[str, date]] = set()
     tip = start == end
     historical_tip = tip and end != trade_date
     if tip:
@@ -998,6 +999,7 @@ def _finish_daily_bars(
             rows_read += terminal["rows_read"]
             rows_written += terminal["rows_written"]
             findings.extend(terminal["audit_findings"])
+            verified_suspension_keys.update(terminal.get("verified_suspension_keys") or [])
         failed_set = set(failed_symbols) | fallback_failed_symbols
         if failed_set:
             gap = _gapfill_multiday_via_kline(
@@ -1232,6 +1234,7 @@ def _finish_daily_bars(
         )
         staged = _staged_daily_bar_symbols(config, run_id, end)
         missing_staged = set(all_expected_symbols) - staged
+        missing_staged -= {symbol for symbol, session in verified_suspension_keys if session == end}
         if missing_staged:
             source_unavailable_full_symbols = missing_staged & sina_empty_etf_symbols
             if source_unavailable_full_symbols:
@@ -1330,6 +1333,14 @@ def _finish_daily_bars(
                     for symbol, session in sorted(source_unavailable_pairs)[:8]
                 ],
             }
+        )
+
+    if verified_suspension_keys:
+        _resolve_recovered_daily_batches(
+            config,
+            run_id,
+            resolved_symbols={symbol for symbol, _session in verified_suspension_keys},
+            resolution=("trading_status plus Sina confirmed no daily bar for suspended key(s)"),
         )
 
     result: dict = {"rows_read": rows_read, "rows_written": rows_written}
@@ -1571,7 +1582,7 @@ def _confirm_non_trading_daily_gaps(
     run_id: str,
     missing_keys: set[tuple[str, date]],
 ) -> dict:
-    # 状态过滤与最终校验必须使用同一凭据；单日空响应不能扩大为整个回看窗口为空。
+    # 状态过滤与最终校验必须使用同一凭据；只接受新浪成功确认的单日空响应。
     evidence = load_negative_evidence(config, "daily_bars")
     confirmed = {
         (symbol, day)
@@ -1582,6 +1593,7 @@ def _confirm_non_trading_daily_gaps(
     rows_read = rows_written = 0
     findings: list[dict] = []
     unresolved: set[tuple[str, date]] = set()
+    verified_suspension_keys = set(confirmed)
     for day in sorted({day for _symbol, day in pending}):
         symbols = sorted(symbol for symbol, session in pending if session == day)
         gap = _gapfill_multiday_via_kline(config, run_id, symbols=symbols, start=day, end=day)
@@ -1589,6 +1601,7 @@ def _confirm_non_trading_daily_gaps(
         rows_written += int(gap.get("rows_written", 0))
         findings.extend(gap.get("audit_findings") or [])
         missing = set(symbols) - _staged_daily_bar_symbols(config, run_id, day)
+        sina_empty: set[str] = set()
         if missing and config.sources.get("sina", True):
             sina = fetch_bars_via_sina(
                 config,
@@ -1602,9 +1615,40 @@ def _confirm_non_trading_daily_gaps(
             rows_read += int(sina.get("rows_read", 0))
             rows_written += int(sina.get("rows_written", 0))
             findings.extend((sina.get("context_updates") or {}).get("audit_findings") or [])
-        unresolved.update(
-            (symbol, day) for symbol in missing - _staged_daily_bar_symbols(config, run_id, day)
-        )
+            sina_empty = set(sina.get("empty_symbol_names") or [])
+
+        # This helper receives only keys which trading_status explicitly marks
+        # non-trading. EastMoney still gets the first chance to fill a bar, but
+        # Sina is the terminal source: its adapter only emits empty_symbol_names
+        # after a successful, parseable response confirms this exact day empty.
+        unresolved_for_day = missing - _staged_daily_bar_symbols(config, run_id, day)
+        verified_suspensions = unresolved_for_day & sina_empty
+        if verified_suspensions:
+            verified_suspension_keys.update((symbol, day) for symbol in verified_suspensions)
+            record_negative_evidence(
+                config,
+                "daily_bars",
+                verified_suspensions,
+                day,
+                day,
+                reason="verified_suspension_no_data",
+                source="sina",
+            )
+            findings.append(
+                {
+                    "dataset": "daily_bars",
+                    "severity": "info",
+                    "check": "daily_bars_suspension_sina_empty",
+                    "message": (
+                        f"trading_status and Sina confirmed no daily bar for "
+                        f"{len(verified_suspensions)} suspended symbol(s) on {day}"
+                    ),
+                    "source": "sina",
+                    "symbols": sorted(verified_suspensions),
+                    "trade_date": day.isoformat(),
+                }
+            )
+        unresolved.update((symbol, day) for symbol in unresolved_for_day - verified_suspensions)
     if unresolved:
         _mark_unresolved_daily_bar_batches(
             config,
@@ -1616,12 +1660,13 @@ def _confirm_non_trading_daily_gaps(
         preview = ", ".join(f"{symbol}@{day}" for symbol, day in sorted(unresolved)[:8])
         raise RuntimeError(
             f"daily_bars: {len(unresolved)} non-trading status key(s) remain unknown after "
-            f"EastMoney/Sina confirmation; refusing to checkpoint: {preview}"
+            f"Sina terminal confirmation; refusing to checkpoint: {preview}"
         )
     return {
         "rows_read": rows_read,
         "rows_written": rows_written,
         "audit_findings": findings,
+        "verified_suspension_keys": sorted(verified_suspension_keys),
     }
 
 

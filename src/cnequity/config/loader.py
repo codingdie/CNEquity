@@ -181,8 +181,10 @@ class Config:
     #
     # These fields intentionally live after the historical dataclass fields so
     # positional Config(...) callers keep their old argument order.
-    # ``None`` means "follow the legacy workers value" for daily bars and
-    # derives (with the macOS HTTP exception documented in the method below).
+    # Daily TDX bars are deliberately serial: the wire client and SQLite
+    # manifest are not reliable with multiple worker processes. Keep these
+    # fields so existing TOML files still parse, but do not use either to
+    # increase the daily-bars lane count.
     tdx_daily_workers: int | None = None
     tdx_daily_backend: str = "auto"
     adj_factor_workers: int | None = None
@@ -301,15 +303,13 @@ class Config:
                     )
 
     def tdx_daily_worker_count(self) -> int:
-        """Return the effective daily-bars lane count.
+        """Return the fixed single-worker lane for daily TDX bars.
 
-        ``tdx_daily_workers`` is intentionally optional for backwards
-        compatibility.  Old Linux configs therefore retain their previous
-        process-pool width, while old macOS configs remain conservative (the
-        platform backend below uses threads and can be raised explicitly).
+        ``tdx_daily_workers`` remains parseable for backwards compatibility,
+        but must not re-enable the ProcessPoolExecutor path: its interaction
+        with the TDX client and SQLite manifest can leave a run hung.
         """
-        value = self.workers if self.tdx_daily_workers is None else self.tdx_daily_workers
-        return max(1, int(value))
+        return 1
 
     def tdx_daily_executor(self) -> str:
         """Resolve the daily-bars executor to ``thread`` or ``process``."""

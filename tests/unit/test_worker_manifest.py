@@ -1,6 +1,4 @@
-import os
 import sqlite3
-import sys
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -461,9 +459,8 @@ def test_manifest_connection_context_closes_connection(tmp_path):
         conn.execute("SELECT 1")
 
 
-@pytest.mark.skipif(
-    sys.platform.startswith("linux") and os.environ.get("CI") == "true",
-    reason="ProcessPoolExecutor + SQLite manifest hangs on Linux GitHub runners",
+@pytest.mark.skip(
+    reason="daily_bars multi-process workers are disabled: ProcessPoolExecutor + SQLite manifest can hang",
 )
 def test_worker_pool_multiprocess_records_batches(worker_config, monkeypatch):
     """Regression: workers>1 used to crash Manifest(str) before start_batch."""

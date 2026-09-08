@@ -7,13 +7,13 @@
 root = "./data/cnequity"
 
 [orchestrator]
-# `workers` remains the legacy/global process budget.  The TDX and HTTP pools
-# below are independent: `cne config init` reduces this value to 1 on macOS,
-# while the macOS-safe TDX thread pool still uses `tdx_daily_workers`.
-# Windows defaults to 1 via `cne config init`; Linux may use >1.
+# `workers` remains the legacy/global process budget for non-TDX work.
+# Daily TDX bars are always serial: the client and SQLite manifest are unsafe
+# under multi-worker execution. `tdx_daily_workers` is retained only so older
+# configs parse; its effective value is always 1.
 workers = 8
-tdx_daily_workers = 4
-tdx_daily_backend = "auto"  # macOS: thread; Linux: process; override if needed
+tdx_daily_workers = 1
+tdx_daily_backend = "auto"  # retained for compatibility; daily TDX is serial
 adj_factor_workers = 4       # Sina HTTP fan-out; independent of TDX workers
 derive_workers = 4
 # Maximum in-flight requests per source.  Pacing (`min_interval_seconds`) is
