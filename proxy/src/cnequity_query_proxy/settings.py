@@ -131,8 +131,16 @@ class ProxySettings:
         return self.data_root / "curated" / "minute_bars_5m"
 
     @property
+    def trading_calendar_root(self) -> Path:
+        return self.data_root / "curated" / "trading_calendar"
+
+    @property
     def trading_status_root(self) -> Path:
         return self.data_root / "curated" / "trading_status"
+
+    @property
+    def dragon_tiger_root(self) -> Path:
+        return self.data_root / "curated" / "dragon_tiger"
 
     @property
     def valuation_metrics_root(self) -> Path:

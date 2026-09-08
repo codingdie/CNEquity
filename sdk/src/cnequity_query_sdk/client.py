@@ -31,6 +31,7 @@ from cnequity_query_sdk.models import (
     AdjustmentFactorPage,
     AdjustmentFactorsDownload,
     Candle,
+    DragonTigerDownload,
     FactorAdjustment,
     Health,
     Instrument,
@@ -40,6 +41,7 @@ from cnequity_query_sdk.models import (
     MarketDailyBarsDownload,
     ParquetArchiveDownload,
     StockSummary,
+    TradingCalendarDownload,
     TradingState,
     TradingStatus,
     TradingStatusDownload,
@@ -335,6 +337,29 @@ class QueryClient:
             result_type=AdjustmentFactorsDownload,
         )
 
+    def download_market_trading_calendar(
+        self,
+        destination: str | Path,
+        *,
+        start: date,
+        end: date,
+        overwrite: bool = False,
+        chunk_size: int = 1024 * 1024,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> TradingCalendarDownload:
+        """将原始交易日历 Parquet 流式下载为 TAR。"""
+        return self._download_parquet_archive(
+            destination,
+            path="v1/trading-calendar/batch",
+            start=start,
+            end=end,
+            overwrite=overwrite,
+            chunk_size=chunk_size,
+            timeout=timeout,
+            resource_name="交易日历",
+            result_type=TradingCalendarDownload,
+        )
+
     def download_market_trading_status(
         self,
         destination: str | Path,
@@ -356,6 +381,29 @@ class QueryClient:
             timeout=timeout,
             resource_name="全市场交易状态",
             result_type=TradingStatusDownload,
+        )
+
+    def download_market_dragon_tiger(
+        self,
+        destination: str | Path,
+        *,
+        start: date,
+        end: date,
+        overwrite: bool = False,
+        chunk_size: int = 1024 * 1024,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> DragonTigerDownload:
+        """将全市场原始龙虎榜 Parquet 流式下载为 TAR。"""
+        return self._download_parquet_archive(
+            destination,
+            path="v1/dragon-tiger/batch",
+            start=start,
+            end=end,
+            overwrite=overwrite,
+            chunk_size=chunk_size,
+            timeout=timeout,
+            resource_name="全市场龙虎榜",
+            result_type=DragonTigerDownload,
         )
 
     def _download_parquet_archive(

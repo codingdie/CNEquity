@@ -18,6 +18,7 @@ from cnequity_query_sdk import (
     AuthenticationError,
     ConflictError,
     DailyCandle,
+    DragonTigerDownload,
     IntradayCandle,
     NotFoundError,
     PeriodCandle,
@@ -27,6 +28,7 @@ from cnequity_query_sdk import (
     RequestValidationError,
     ResponseDecodeError,
     ServiceUnavailableError,
+    TradingCalendarDownload,
     TradingStatus,
     TradingStatusDownload,
     TransportError,
@@ -342,14 +344,29 @@ def test_download_market_daily_bars_fails_loudly_and_leaves_no_partial_file(tmp_
             "curated/trading_status/trade_date=2026-01/part-merged.parquet",
             TradingStatusDownload,
         ),
+        (
+            "download_market_trading_calendar",
+            "/prefix/v1/trading-calendar/batch",
+            "curated/trading_calendar/trade_date=2026/part-merged.parquet",
+            TradingCalendarDownload,
+        ),
+        (
+            "download_market_dragon_tiger",
+            "/prefix/v1/dragon-tiger/batch",
+            "curated/dragon_tiger/trade_date=2026-01/part-merged.parquet",
+            DragonTigerDownload,
+        ),
     ],
 )
-def test_download_market_research_data_streams_parquet_archives(
+def test_download_market_batch_data_streams_parquet_archives(
     tmp_path,
     method_name: str,
     endpoint: str,
     member_name: str,
-    result_type: type[AdjustmentFactorsDownload] | type[TradingStatusDownload],
+    result_type: type[AdjustmentFactorsDownload]
+    | type[TradingCalendarDownload]
+    | type[TradingStatusDownload]
+    | type[DragonTigerDownload],
 ):
     archive = _parquet_archive(member_name)
 

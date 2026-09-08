@@ -126,6 +126,54 @@ def write_trading_status(root: Path, partition: date, rows: list[tuple]) -> None
         connection.close()
 
 
+def write_trading_calendar(root: Path, partition_year: int, rows: list[tuple]) -> None:
+    target = root / "curated" / "trading_calendar" / f"trade_date={partition_year}"
+    target.mkdir(parents=True, exist_ok=True)
+    connection = duckdb.connect(":memory:")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE trading_calendar (
+                trade_date DATE,
+                is_trading BOOLEAN,
+                source VARCHAR,
+                data_version VARCHAR,
+                fetched_at TIMESTAMP
+            )
+            """
+        )
+        connection.executemany("INSERT INTO trading_calendar VALUES (?, ?, ?, ?, ?)", rows)
+        _copy_table(connection, "trading_calendar", target / "part-merged.parquet")
+    finally:
+        connection.close()
+
+
+def write_dragon_tiger(root: Path, partition: date, rows: list[tuple]) -> None:
+    target = root / "curated" / "dragon_tiger" / f"trade_date={partition.strftime('%Y-%m')}"
+    target.mkdir(parents=True, exist_ok=True)
+    connection = duckdb.connect(":memory:")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE dragon_tiger (
+                symbol VARCHAR,
+                trade_date DATE,
+                reason VARCHAR,
+                buy_amount DOUBLE,
+                sell_amount DOUBLE,
+                net_amount DOUBLE,
+                source VARCHAR,
+                data_version VARCHAR,
+                fetched_at TIMESTAMP
+            )
+            """
+        )
+        connection.executemany("INSERT INTO dragon_tiger VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        _copy_table(connection, "dragon_tiger", target / "part-merged.parquet")
+    finally:
+        connection.close()
+
+
 def write_instruments(root: Path, rows: list[tuple]) -> None:
     target = root / "curated" / "instruments"
     target.mkdir(parents=True, exist_ok=True)
@@ -186,6 +234,37 @@ def lake_root(tmp_path: Path) -> Path:
             ("000001.SZ", date(2026, 1, 2), True, "normal", True),
             ("600519.SH", date(2026, 1, 5), False, "suspended", True),
             ("600519.SH", date(2026, 1, 6), False, "delisted", None),
+        ],
+    )
+    write_trading_calendar(
+        tmp_path,
+        2026,
+        [
+            (date(2026, 1, 1), False, "exchange_calendar", "test", None),
+            (date(2026, 1, 2), True, "exchange_calendar", "test", None),
+            (date(2026, 1, 5), True, "exchange_calendar", "test", None),
+        ],
+    )
+    write_trading_calendar(
+        tmp_path,
+        2027,
+        [(date(2027, 1, 4), True, "exchange_calendar", "test", None)],
+    )
+    write_dragon_tiger(
+        tmp_path,
+        date(2026, 1, 1),
+        [
+            (
+                "600519.SH",
+                date(2026, 1, 2),
+                "日涨幅偏离值达到7%的前5只证券",
+                1000,
+                500,
+                500,
+                "eastmoney",
+                "test",
+                None,
+            )
         ],
     )
     write_minute_bars(

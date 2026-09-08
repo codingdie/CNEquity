@@ -7,7 +7,9 @@ DuckDB 或元数据；与主项目唯一的接口是本地 Parquet 文件布局�
 {CNEQUITY_PROXY_DATA_ROOT}/curated/daily_bars/trade_date=YYYY-MM-DD/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/minute_bars/trade_date=YYYY-MM-DD/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/minute_bars_5m/trade_date=YYYY-MM-DD/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/trading_calendar/trade_date=YYYY/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/trading_status/trade_date=YYYY-MM/*.parquet
+{CNEQUITY_PROXY_DATA_ROOT}/curated/dragon_tiger/trade_date=YYYY-MM/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/instruments/part-merged.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/valuation_metrics/trade_date=YYYY-MM-DD/*.parquet
 {CNEQUITY_PROXY_DATA_ROOT}/curated/industry_members/as_of_date=YYYY-MM-DD/*.parquet
@@ -20,12 +22,12 @@ DuckDB 或元数据；与主项目唯一的接口是本地 Parquet 文件布局�
 {CNEQUITY_PROXY_DATA_ROOT}/derived/adj_factors/trade_date=YYYY-MM-DD/*.parquet
 ```
 
-当前提供证券基础信息、每日交易状态、单股轻量摘要、全市场原始日线/后复权因子/交易状态批量下载、
-`1d`、`1m`、`5m`、`1w`、`1mo` K 线与复权因子查询。批量下载以流式 TAR 原样下发指定日期窗口
-匹配的 `daily_bars`、`adj_factors` 或 `trading_status` Parquet 文件，不经 DuckDB 或 JSON；摘要聚合
-基础信息、最新市场状态、行业/板块/指数归属及轻量信号。周/月线由本地日 K 聚合，`1m` 和 `5m`
-读取各自独立的日内 Parquet 目录，交易状态读取独立的月分区目录；它不会抓取上游数据、不会写入
-数据湖，也不会修改任何现有文件。
+当前提供证券基础信息、每日交易状态、单股轻量摘要、全市场原始日线/后复权因子/交易日历/交易状态/
+龙虎榜批量下载、`1d`、`1m`、`5m`、`1w`、`1mo` K 线与复权因子查询。批量下载以流式 TAR 原样下发
+指定日期窗口匹配的 `daily_bars`、`adj_factors`、`trading_calendar`、`trading_status` 或
+`dragon_tiger` Parquet 文件，不经 DuckDB 或 JSON；摘要聚合基础信息、最新市场状态、行业/板块/指数归属
+及轻量信号。周/月线由本地日 K 聚合，`1m` 和 `5m` 读取各自独立的日内 Parquet 目录；它不会抓取上游
+数据、不会写入数据湖，也不会修改任何现有文件。
 
 ## 安装与启动
 
@@ -55,13 +57,13 @@ Python 调用方可安装独立的 [CNEquity Query SDK](../sdk/README.md)，通�
 
 ## 性能与运行边界
 
-- 先按 `trade_date=` 分区目录选择日 K、日内 K、复权因子和交易状态文件；交易状态按月分区，证券主数据只打开固定 canonical 文件，避免全湖递归 glob。
+- 先按 `trade_date=` 分区目录选择日 K、日内 K、复权因子、交易日历、交易状态和龙虎榜文件；交易日历按年分区，交易状态和龙虎榜按月分区，证券主数据只打开固定 canonical 文件，避免全湖递归 glob。
 - 单股摘要只打开十个白名单轻量数据集的最新分区；`market.latest_market` 最多返回一条最新可用日级行情快照，不读取分钟线、日 K 历史、财报或股东明细。每个模块保留各自的日期与溯源。
 - SQL 只投影接口所需列，并将 symbol、日期、名称搜索和页大小过滤推给 DuckDB。
-- 全市场日线、后复权因子和交易状态批量下载只枚举各自匹配的 Parquet 分区，并以 1 MiB 块流式
-  读取原始文件；不会将全市场行或完整归档留在内存。它们不使用普通查询额度，也不施加日期、文件、
-  原始字节或并发下载配额。交易状态按月分区，日期窗口会下载重叠月份的整月文件，研究端再按文件内
-  `trade_date` 精确过滤。
+- 全市场日线、后复权因子、交易日历、交易状态和龙虎榜批量下载只枚举各自匹配的 Parquet 分区，并以
+  1 MiB 块流式读取原始文件；不会将全市场行或完整归档留在内存。它们不使用普通查询额度，也不施加
+  日期、文件、原始字节或并发下载配额。交易日历按年分区，交易状态和龙虎榜按月分区；日期窗口会下载
+  重叠分区的完整文件，研究端再按文件内 `trade_date` 精确过滤。
 - 日/周/月 JSON 查询默认单次窗口最多 3660 天；`1m` 默认最多 31 天、`5m` 默认最多 90 天，均可用
   环境变量调整。非批量查询单次最多打开 6000 个 Parquet 文件。
 - 周/月线先逐日复权再聚合；日内线不在请求期内从另一个频率重采样，避免额外扫描和语义偏差。

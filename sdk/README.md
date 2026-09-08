@@ -68,20 +68,23 @@ with QueryClient("https://cnequity.codingdie.com/query", api_key="your-token") a
 | `get_stock_summary()` | `GET /v1/stocks/{symbol}/summary` | `StockSummary` |
 | `download_market_daily_bars()` | `GET /v1/kline/batch` | `MarketDailyBarsDownload` |
 | `download_market_adjustment_factors()` | `GET /v1/adjustment-factors/batch` | `AdjustmentFactorsDownload` |
+| `download_market_trading_calendar()` | `GET /v1/trading-calendar/batch` | `TradingCalendarDownload` |
 | `download_market_trading_status()` | `GET /v1/trading-status/batch` | `TradingStatusDownload` |
+| `download_market_dragon_tiger()` | `GET /v1/dragon-tiger/batch` | `DragonTigerDownload` |
 | `get_kline()` / `iter_kline()` | `GET /v1/kline/{symbol}` | `KlinePage` / `DailyCandle`、`IntradayCandle` 或 `PeriodCandle` |
 | `get_adjustment_factors()` / `iter_adjustment_factors()` | `GET /v1/adjustment-factors/{symbol}` | `AdjustmentFactorPage` / `AdjustmentFactor` |
 
 所有分页迭代器会原样保留筛选条件和复权基准日。若服务端返回未推进的游标，SDK 会抛出
 `ResponseDecodeError`，避免无穷循环。
 
-三个 `download_market_*()` 方法都使用一个 HTTP 请求，将全市场原始 Parquet 文件流式写入 TAR。
+五个 `download_market_*()` 方法都使用一个 HTTP 请求，将全市场原始 Parquet 文件流式写入 TAR。
 目标文件已存在时默认抛出 `FileExistsError`；下载失败时会删除 SDK 自己创建的临时文件，不会留下
 看似完整的归档。默认不施加单次下载超时；需要限制时传入 `timeout=`。
 
 日线归档是未复权价格，复权因子归档是湖内持久化的后复权因子；客户端可按研究所选基准日计算前复权。
-交易状态按月物理分区，日期窗口会下载重叠月份的完整原始文件，解压后应按文件内的 `trade_date` 列
-做精确日期过滤。三个批量接口不设代理层的日期、文件数、原始字节或并发下载额度。
+交易日历按年物理分区，交易状态和龙虎榜按月物理分区；日期窗口会下载重叠分区的完整原始文件，解压后
+应按文件内的 `trade_date` 列做精确日期过滤。五个批量接口不设代理层的日期、文件数、原始字节或并发
+下载额度。
 
 ## 错误处理
 

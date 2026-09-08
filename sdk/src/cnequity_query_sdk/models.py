@@ -135,8 +135,18 @@ class AdjustmentFactorsDownload(ParquetArchiveDownload):
 
 
 @dataclass(frozen=True, slots=True)
+class TradingCalendarDownload(ParquetArchiveDownload):
+    """一次交易日历 TAR 下载的落盘结果。"""
+
+
+@dataclass(frozen=True, slots=True)
 class TradingStatusDownload(ParquetArchiveDownload):
     """一次全市场交易状态 TAR 下载的落盘结果。"""
+
+
+@dataclass(frozen=True, slots=True)
+class DragonTigerDownload(ParquetArchiveDownload):
+    """一次全市场龙虎榜 TAR 下载的落盘结果。"""
 
 
 @dataclass(frozen=True, slots=True)

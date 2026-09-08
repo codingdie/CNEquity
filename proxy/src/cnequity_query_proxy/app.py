@@ -523,6 +523,12 @@ def create_app(settings: ProxySettings) -> FastAPI:
     monthly_kline_service = PeriodKlineService(settings, interval="1mo", slots=query_slots)
     stock_summary_service = StockSummaryService(settings, slots=query_slots)
     market_daily_bars_service = MarketDailyBarsService(settings)
+    trading_calendar_batch_service = ParquetBatchService(
+        settings,
+        root=settings.trading_calendar_root,
+        dataset_name="trading_calendar",
+        data_label="交易日历",
+    )
     adjustment_factors_batch_service = ParquetBatchService(
         settings,
         root=settings.adj_factors_root,
@@ -535,6 +541,12 @@ def create_app(settings: ProxySettings) -> FastAPI:
         dataset_name="trading_status",
         data_label="交易状态",
     )
+    dragon_tiger_batch_service = ParquetBatchService(
+        settings,
+        root=settings.dragon_tiger_root,
+        dataset_name="dragon_tiger",
+        data_label="龙虎榜",
+    )
     app.state.settings = settings
     app.state.kline_service = service
     app.state.adjustment_factor_service = factor_service
@@ -546,8 +558,10 @@ def create_app(settings: ProxySettings) -> FastAPI:
     app.state.monthly_kline_service = monthly_kline_service
     app.state.stock_summary_service = stock_summary_service
     app.state.market_daily_bars_service = market_daily_bars_service
+    app.state.trading_calendar_batch_service = trading_calendar_batch_service
     app.state.adjustment_factors_batch_service = adjustment_factors_batch_service
     app.state.trading_status_batch_service = trading_status_batch_service
+    app.state.dragon_tiger_batch_service = dragon_tiger_batch_service
 
     def batch_archive_response(
         service: ParquetBatchService,
@@ -649,6 +663,26 @@ def create_app(settings: ProxySettings) -> FastAPI:
             ],
             as_of=as_of,
             next_cursor=page.next_cursor,
+        )
+
+    @app.get(
+        "/v1/trading-calendar/batch",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "content": {"application/x-tar": {}},
+                "description": "原始交易日历 Parquet 的流式 TAR 归档。",
+            }
+        },
+    )
+    def market_trading_calendar_batch(start: date, end: date) -> StreamingResponse:
+        """流式下载所选窗口重叠年份的原始交易日历 Parquet。"""
+        return batch_archive_response(
+            trading_calendar_batch_service,
+            start=start,
+            end=end,
+            filename_prefix="cnequity-trading-calendar",
+            unavailable_detail="交易日历数据湖暂不可用",
         )
 
     @app.get(
@@ -780,6 +814,26 @@ def create_app(settings: ProxySettings) -> FastAPI:
                 },
                 "unavailable_datasets": list(summary.unavailable_datasets),
             }
+        )
+
+    @app.get(
+        "/v1/dragon-tiger/batch",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "content": {"application/x-tar": {}},
+                "description": "原始全市场龙虎榜 Parquet 的流式 TAR 归档。",
+            }
+        },
+    )
+    def market_dragon_tiger_batch(start: date, end: date) -> StreamingResponse:
+        """流式下载所选窗口重叠月份的原始全市场龙虎榜 Parquet。"""
+        return batch_archive_response(
+            dragon_tiger_batch_service,
+            start=start,
+            end=end,
+            filename_prefix="cnequity-dragon-tiger",
+            unavailable_detail="龙虎榜数据湖暂不可用",
         )
 
     @app.get(
