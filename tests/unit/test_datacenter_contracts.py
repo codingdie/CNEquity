@@ -32,6 +32,7 @@ _EXPECTED_REQUIRED_REPORTS = frozenset(
         "RPTA_WEB_TREASURYYIELD",
         "RPT_IMP_INTRESTRATEN",
         "RPTA_WEB_RATE",
+        "RPT_CPH_FECALENDAR",
         "RPT_LICO_FN_CPD",
         "RPT_DMSK_FN_BALANCE",
         "RPT_DMSK_FN_INCOME",
@@ -77,8 +78,7 @@ def test_required_reports_match_known_call_sites():
     reports = {c.report for c in required}
     assert _EXPECTED_REQUIRED_REPORTS <= reports
     assert "RPT_ECONOMICCALENDAR" not in reports
-    retired = [c for c in datacenter_contracts() if not c.required]
-    assert any(c.report == "RPT_ECONOMICCALENDAR" for c in retired)
+    assert all(c.report != "RPT_ECONOMICCALENDAR" for c in datacenter_contracts())
 
 
 def test_no_duplicate_required_name_or_report_columns_pair():

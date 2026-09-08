@@ -117,7 +117,6 @@ def datacenter_contracts() -> tuple[DatacenterContract, ...]:
             "economic_calendar",
             econ_mod._REPORT,
             econ_mod._COLUMNS,
-            required=False,
         ),
     ]
     for report in fund_mod._REPORTS:

@@ -627,7 +627,7 @@ def test_lake_health_snapshot(tmp_path):
     assert "daily_bars" not in health["empty_datasets"]
     # most datasets have no data in this minimal lake
     assert "fund_flow" in health["empty_datasets"]
-    assert "economic_calendar" in health["expected_empty_datasets"]
-    assert "economic_calendar" not in health["empty_datasets"]
+    assert "economic_calendar" not in health["expected_empty_datasets"]
+    assert "economic_calendar" in health["empty_datasets"]
     assert (cfg.meta_root / "quality" / "health-latest.json").exists()
     assert (cfg.meta_root / "quality" / "historical-validity-latest.json").exists()

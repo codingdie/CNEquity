@@ -247,6 +247,25 @@
 
 ---
 
+#### economic_calendar
+
+| 项 | 值 |
+|------|-------|
+| 分组 | macro_risk |
+| 主源 | eastmoney 财经日历 `RPT_CPH_FECALENDAR`，仅 `STD_TYPE_CODE=2`（经济数据） |
+| 页面依据 | <https://data.eastmoney.com/cjrl/default.html> 及其 `newstatic/js/cjrl/default.js` |
+| 窗口 | 采集日 -2 至 +14 个自然日；请求按 `START_DATE` 限定窗口并完整分页 |
+| 主键 | `event_date\|event_time\|country\|indicator`，保留现有 `event_id` 格式 |
+| 事件信息 | `START_DATE` → 日期/北京时间，`FE_NAME` → 指标名称（含报告期），`CITY` → 国家/地区/机构标签，原样保留 |
+| 时间限制 | 源端 `00:00:00` 在页面表示仅日期，`event_time` 留空，不认证为明确的午夜发布时间 |
+| 数值限制 | 该报表不提供 `forecast`、`previous`、`actual`、`importance`、`unit`，均保留为 null；不从名称推算、不自动混用其他来源 |
+| 历史语义 | 当前发布日程的滚动快照；不支持历史回填，也不将未来事件日期写为成功水位。成功采集日记录在 `last_snapshot_date` |
+| 失效处理 | 报表拒绝、畸形行或不完整分页均失败，不写入部分 staging；保留实际原始 HTTP 响应与 `source=eastmoney` 溯源 |
+
+旧 `RPT_ECONOMICCALENDAR` 已返回 code 9501；恢复后的日程源不提供旧接口设想的
+预期/前值/公布值能力。Parquet 列、类型、主键、snapshot/PIT 语义保持原契约，
+无需重写旧数据或提升 schema version；新采集的源端缺失值显式为 null。
+
 ### 源可用性矩阵
 
 | 来源 | 协议 | MVP 用途 | 备源 | 降级策略 |

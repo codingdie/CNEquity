@@ -571,6 +571,7 @@ ECONOMIC_CALENDAR_SCHEMA = {
     "event_time": pl.Utf8,
     "country": pl.Utf8,
     "indicator": pl.Utf8,
+    # 当前 eastmoney RPT_CPH_FECALENDAR 仅提供日程，下列五个字段保留 null。
     "importance": pl.Int8,
     "forecast": pl.Float64,
     "previous": pl.Float64,

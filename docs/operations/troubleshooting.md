@@ -19,7 +19,9 @@ uv run pytest -m network tests/unit/test_datacenter_live_contracts.py -q
 ```
 
 清单入口：`src/cnequity/adapters/eastmoney/datacenter_contracts.py`。
-已退役报表（如 `RPT_ECONOMICCALENDAR`）标 `required=False`，不进直播探针。
+`economic_calendar` 已从退役的 `RPT_ECONOMICCALENDAR` 切到网页实际使用的
+`RPT_CPH_FECALENDAR`，现行报表会进入直播探针。它只提供经济数据发布日程，
+前值、预期值和公布值为空是源能力限制；整张日程为空则应检查采集失败记录。
 
 ---
 

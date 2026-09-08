@@ -6,6 +6,14 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `economic_calendar` 恢复东方财富经济事件日程采集：从已失效的
+  `RPT_ECONOMICCALENDAR` 更新为网页现行 `RPT_CPH_FECALENDAR`，按日期窗口完整分页。
+  现行源只提供日程，前值、预期值、公布值、重要性和单位保留为 null；不混用来源、
+  不认证历史 PIT、不用未来事件推进水位。列类型及主键保持兼容，无需数据迁移。
+  恢复该报表的联网契约探针，空表恢复 warning，异常响应不能写入部分结果。
+
 ## [0.8.0] — 2026-09-06
 
 ### Added

@@ -51,13 +51,13 @@ def test_audit_checks_all_partition_col_datasets(tmp_path):
     )
     exists_checks = {f["dataset"] for f in payload["findings"] if f.get("check") == "exists"}
     assert exists_checks == set(PARTITION_COLS.keys())
-    # Optional datasets (source not yet wired) must not fail lake health alone.
+    # 已恢复的可选日程源为空时应告警，不再作为源已下线的预期空表。
     optional_exists = [
         f
         for f in payload["findings"]
         if f.get("check") == "exists" and f.get("dataset") == "economic_calendar"
     ]
-    assert optional_exists and optional_exists[0]["severity"] == "info"
+    assert optional_exists and optional_exists[0]["severity"] == "warning"
     required_exists = [
         f
         for f in payload["findings"]

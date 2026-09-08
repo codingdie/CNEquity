@@ -1039,8 +1039,7 @@ _SPECS = [
         # A news wire does not close for the weekend.
         session_scope="calendar",
     ),
-    # EM datacenter report RPT_ECONOMICCALENDAR was retired (code 9501); keep the
-    # schema/registry for a replacement source, but do not fail lake health.
+    # 东财现行财经日历的经济数据发布日程；预期/前值/公布值不在该源中。
     DatasetSpec(
         "economic_calendar",
         primary_source="eastmoney",
@@ -1053,10 +1052,8 @@ _SPECS = [
         # must not advance a freshness watermark beyond the run day.
         watermark=False,
         required=False,
-        # The EastMoney report was retired; no replacement source is wired.
-        # Keep the registry entry for the schema and future replacement, but
-        # do not present its expected empty root as an active quality warning.
-        empty_severity="info",
+        # 已接入有效报表，空表应保留 warning，不能继续当作预期为空的占位项。
+        empty_severity="warning",
     ),
     # L8 risk
     DatasetSpec(

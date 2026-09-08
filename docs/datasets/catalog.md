@@ -24,7 +24,7 @@ cnequity 交付 **42 个注册数据集**（39 curated + 3 derived：`adj_factor
 | **L7** 舆情 / 轮动 | 新闻、情绪、板块、人气、事件流 | sentiment_scores, hot_rank, sector_bars, sector_fund_flow, news_headlines, flash_news_wire, economic_calendar*（stock_news 为 on-demand） |
 | **L8** 风险合规 | 解禁、监管 | share_unlock_schedule, regulatory_events |
 
-\*可选或 `required=false`：分钟线默认关；商品期货需显式回填；`economic_calendar` 东财源已下线，仅占位。
+\*可选或 `required=false`：分钟线默认关；商品期货需显式回填；`economic_calendar` 提供东财经济数据发布日程，不含预期值和公布值。
 
 分层是**研究用途**，与存储 `layer` 正交：`adj_factors` / `delisting_events`（L1）和 `industry_index`（L5）落在 `derived/` 而非 `curated/`，但按用途归入各自层，所以没有单独的「派生」层。权威来源是 `DatasetSpec.tier`；`test_docs_catalog.py` 断言本文档与注册表逐层一致。
 
@@ -275,7 +275,7 @@ bars_15m = (
 | sector_fund_flow | trade_date | sector_code, trade_date | snapshot | ✓ | eastmoney | 板块主力净流入 |
 | news_headlines | publish_date | news_id | snapshot | ✓ | eastmoney | 新闻标题 |
 | flash_news_wire | publish_date | wire_id, wire_source | snapshot | ✓ | eastmoney | 7×24 快讯线 |
-| economic_calendar | event_date（按年） | event_id | snapshot | ✓ | —（源已下线） | EM `RPT_ECONOMICCALENDAR` 已退役（code 9501），保留 schema 等替代源；`required=false`，空表不判 UNHEALTHY |
+| economic_calendar | event_date（按年） | event_id | snapshot | — | eastmoney | 现行 `RPT_CPH_FECALENDAR` 的经济数据日程；滚动窗口为采集日 -2 至 +14 天，不承诺历史 PIT；前值、预期值、公布值、重要性和单位均为 null；可选数据集，空表告警 |
 
 `sector_bars` 日更只有当日 OHLC；历史由 `cne backfill sector_bars` 一次性写入（国内网络或代理）。
 海外一键脚本见引擎 `scripts/china_egress_backfill.sh`（含 `trading_status` ST 回填）。

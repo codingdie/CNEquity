@@ -49,6 +49,7 @@ EM 改列名会整报 `code=9501`。适配器里的 `_REPORT` / `_COLUMNS` 是�
 | `share_unlock.py` | share_unlock_schedule |
 | `stock_news.py` | stock_news（on-demand / sentiment） |
 | `rotation.py` | hot_rank, sector_bars, sector_fund_flow, news_headlines |
+| `economic_calendar.py` | `RPT_CPH_FECALENDAR` 经济数据发布日程；数值字段为空，完整窗口分页并保留原始证据 |
 
 ---
 
