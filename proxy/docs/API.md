@@ -83,6 +83,7 @@ Authorization: Bearer <CNEQUITY_PROXY_API_KEY>
 | `GET /v1/trading-status/{symbol}` | 是（配置 Key 时） | 查询证券每日交易状态与风险警示 |
 | `GET /v1/stocks/{symbol}/summary` | 是（配置 Key 时） | 查询单只证券的轻量当前摘要 |
 | `GET /v1/dragon-tiger/batch` | 是（配置 Key 时） | 流式下载全市场原始龙虎榜 Parquet |
+| `GET /v1/sector-members/batch` | 是（配置 Key 时） | 流式下载原始板块成分历史快照 Parquet |
 | `GET /v1/kline/batch` | 是（配置 Key 时） | 流式下载全市场原始日线 Parquet |
 | `GET /v1/kline/{symbol}` | 是（配置 Key 时） | 查询原始、前复权或后复权的日、日内、周、月 K |
 | `GET /v1/adjustment-factors/batch` | 是（配置 Key 时） | 流式下载全市场原始后复权因子 Parquet |
@@ -700,3 +701,37 @@ GET /v1/trading-status/600519.SH?start=2025-01-01&end=2025-12-31&status=suspende
 2. 更新对应的 API 测试。
 3. 运行代理测试。`test_api_documentation.py` 会校验路由清单、接口章节及全部 path/query
    参数名与实际业务路由完全一致；未同步文档将导致测试失败。
+
+
+## 板块成分历史批量下载
+
+### `GET /v1/sector-members/batch`
+
+只读取 `curated/sector_members/as_of_date=YYYY-MM-DD/*.parquet`，沿用日线批量接口的
+流式 TAR 格式、鉴权和响应头。归档保留相对数据湖根目录的路径、原始文件字节、全部字段
+（包括 `source`、`data_version`、`fetched_at`），不筛选行或重编码。
+
+| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `start` | query | date | 是 | - | YYYY-MM-DD，闭区间开始日 |
+| `end` | query | date | 是 | - | YYYY-MM-DD，闭区间结束日 |
+| `include_previous_snapshot` | query | boolean | 否 | false | 额外包含严格早于 start 的最近一个日快照的全部文件 |
+
+“完整快照”指经过采集校验和 compact 门禁发布到 curated 的整个日分区；接口不读取
+manifest 或质量元数据，不重新认证源侧覆盖，也不按板块拼接不同日期的成员。
+只选择已有日分区，忽略无日期文件、月/年分区和没有 Parquet 文件的目录。
+
+开启 `include_previous_snapshot` 后，即使窗口内没有快照，只要存在此前快照仍可返回 TAR。
+若不存在此前快照，则仅返回窗口内文件；调用方应检查归档中的 `as_of_date`，不能假定
+窗口第一天已有成员覆盖。窗口内文件和请求的此前快照都不存在时返回 404，数据集目录
+不存在时返回 503，缺少或无效日期、start 晚于 end、无效布尔参数返回 422。
+
+本接口不触发采集、不补齐缺失记录、不用未来快照代替历史快照。与日线批量下载一致，
+不受普通查询窗口、文件数和并发额度限制；响应包含 `X-CNEQUITY-Data-Files`、
+`X-CNEQUITY-Data-Bytes`、`Cache-Control: no-store` 和 `X-Cache: BYPASS`。
+
+```bash
+curl -L -H "Authorization: Bearer $CNEQUITY_PROXY_API_KEY" \
+  "https://proxy.example/v1/sector-members/batch?start=2025-01-01&end=2025-12-31&include_previous_snapshot=true" \
+  --output cnequity-sector-members-2025.tar
+```

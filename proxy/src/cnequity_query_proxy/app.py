@@ -547,6 +547,15 @@ def create_app(settings: ProxySettings) -> FastAPI:
         dataset_name="dragon_tiger",
         data_label="龙虎榜",
     )
+    sector_members_batch_service = ParquetBatchService(
+        settings,
+        root=settings.sector_members_root,
+        dataset_name="sector_members",
+        data_label="板块成分",
+        partition_key="as_of_date",
+        daily_snapshots=True,
+    )
+    app.state.sector_members_batch_service = sector_members_batch_service
     app.state.settings = settings
     app.state.kline_service = service
     app.state.adjustment_factor_service = factor_service
@@ -570,11 +579,14 @@ def create_app(settings: ProxySettings) -> FastAPI:
         end: date,
         filename_prefix: str,
         unavailable_detail: str,
+        include_previous_snapshot: bool = False,
     ) -> StreamingResponse:
         if start > end:
             raise HTTPException(422, "start 不能晚于 end")
         try:
-            archive = service.open_archive(start=start, end=end)
+            archive = service.open_archive(
+                start=start, end=end, include_previous_snapshot=include_previous_snapshot
+            )
         except NoBatchParquetFiles as exc:
             raise HTTPException(404, str(exc)) from exc
         except LakeUnavailable as exc:
@@ -834,6 +846,35 @@ def create_app(settings: ProxySettings) -> FastAPI:
             end=end,
             filename_prefix="cnequity-dragon-tiger",
             unavailable_detail="龙虎榜数据湖暂不可用",
+        )
+
+    @app.get(
+        "/v1/sector-members/batch",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "content": {"application/x-tar": {}},
+                "description": "原始板块成分快照 Parquet 的流式 TAR 归档。",
+            }
+        },
+    )
+    def sector_members_batch(
+        start: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        end: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        include_previous_snapshot: bool = False,
+    ) -> StreamingResponse:
+        """只读下载历史板块成分快照，不补缺失或使用未来快照。"""
+        try:
+            start_date, end_date = date.fromisoformat(start), date.fromisoformat(end)
+        except ValueError as exc:
+            raise HTTPException(422, "日期必须是有效的 YYYY-MM-DD") from exc
+        return batch_archive_response(
+            sector_members_batch_service,
+            start=start_date,
+            end=end_date,
+            filename_prefix="cnequity-sector-members",
+            unavailable_detail="板块成分数据湖暂不可用",
+            include_previous_snapshot=include_previous_snapshot,
         )
 
     @app.get(

@@ -81,6 +81,23 @@ class PartitionIndex:
             return list(latest.files)
         return list(root_files)
 
+    def snapshot_files_for(
+        self, start: date, end: date, *, include_previous_snapshot: bool = False
+    ) -> list[Path]:
+        """返回窗口内完整日分区，可附加严格早于窗口的最近日分区。
+
+        完整性依赖 curated 写入门禁；不按板块拼接不同日期，也不使用
+        无日期文件或月、年分区推断历史快照。
+        """
+        entries, _ = self._snapshot()
+        daily = [entry for entry in entries if entry.start == entry.end]
+        selected = [entry for entry in daily if start <= entry.start <= end]
+        if include_previous_snapshot:
+            previous = [entry for entry in daily if entry.end < start]
+            if previous:
+                selected.insert(0, max(previous, key=lambda entry: entry.end))
+        return [path for entry in selected for path in entry.files]
+
     def _snapshot(self) -> tuple[tuple[PartitionFiles, ...], tuple[Path, ...]]:
         if not self._root.is_dir():
             raise FileNotFoundError(f"{self._dataset_name} 目录不存在: {self._root}")

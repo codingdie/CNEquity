@@ -95,10 +95,12 @@ class ParquetBatchRepository:
         dataset_name: str,
         data_label: str,
         partition_key: str = "trade_date",
+        daily_snapshots: bool = False,
     ):
         self._settings = settings
         self._root = root
         self._data_label = data_label
+        self._daily_snapshots = daily_snapshots
         self._partitions = PartitionIndex(
             root,
             ttl_seconds=settings.cache_ttl_seconds,
@@ -106,10 +108,17 @@ class ParquetBatchRepository:
             partition_key=partition_key,
         )
 
-    def prepare(self, *, start: date, end: date) -> tuple[tuple[_ArchiveMember, ...], int]:
+    def prepare(
+        self, *, start: date, end: date, include_previous_snapshot: bool = False
+    ) -> tuple[tuple[_ArchiveMember, ...], int]:
         for attempt in range(2):
             try:
-                paths = self._partitions.files_for(start, end)
+                if self._daily_snapshots:
+                    paths = self._partitions.snapshot_files_for(
+                        start, end, include_previous_snapshot=include_previous_snapshot
+                    )
+                else:
+                    paths = self._partitions.files_for(start, end)
             except FileNotFoundError as exc:
                 raise LakeUnavailable(str(exc)) from exc
             if not paths:
@@ -160,6 +169,7 @@ class ParquetBatchService:
         dataset_name: str,
         data_label: str,
         partition_key: str = "trade_date",
+        daily_snapshots: bool = False,
     ):
         self._repository = ParquetBatchRepository(
             settings,
@@ -167,11 +177,16 @@ class ParquetBatchService:
             dataset_name=dataset_name,
             data_label=data_label,
             partition_key=partition_key,
+            daily_snapshots=daily_snapshots,
         )
         self._data_label = data_label
 
-    def open_archive(self, *, start: date, end: date) -> ParquetBatchArchive:
-        members, data_bytes = self._repository.prepare(start=start, end=end)
+    def open_archive(
+        self, *, start: date, end: date, include_previous_snapshot: bool = False
+    ) -> ParquetBatchArchive:
+        members, data_bytes = self._repository.prepare(
+            start=start, end=end, include_previous_snapshot=include_previous_snapshot
+        )
         return ParquetBatchArchive(
             members,
             data_bytes=data_bytes,
