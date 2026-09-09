@@ -7,9 +7,9 @@ without losing anything except one field (below).
 
 Measured 2026-08-30 against the live publishers:
 
-* **SSE** serves ``queryMargin.do`` and returned all 1,999 marginable SH
-  securities in a single request (``pageSize`` is honoured, so the 20-row page
-  default never applies).
+* **SSE** serves ``queryMargin.do``. The requested ``pageSize`` avoids its
+  20-row default, but the server caps a page at 2,000 rows, so the adapter walks
+  every page and checks the combined response against ``total``.
 * **SZSE** serves the same detail as an xlsx export of report ``1837_xxpl``
   tab 2, in raw 元 and 股 — the JSON form of the identical report paginates at
   20 rows and states 亿/万 units, so the export is both cheaper and less lossy.
@@ -58,15 +58,16 @@ _EMPTY_MARGIN = pl.DataFrame(
     }
 )
 
-# `pageHelp.pageSize` is honoured, so one request covers the market. The cap is
-# set well above the ~2,000 marginable SH securities and the response is checked
-# against `total` so a silently truncated page cannot pass as a complete day.
-SSE_PAGE_SIZE = 5000
+# SSE caps responses at 2,000 rows even when a larger page is requested. The
+# market crossed that boundary in September 2026, so every reported page must
+# be fetched before the day can be certified as complete.
+SSE_PAGE_SIZE = 2000
 SSE_URL = (
     "http://query.sse.com.cn/marketdata/tradedata/queryMargin.do"
     "?isPagination=true&tabType=mxtype&detailsDate={day}"
-    f"&pageHelp.pageSize={SSE_PAGE_SIZE}"
-    "&pageHelp.pageNo=1&pageHelp.beginPage=1&pageHelp.cacheSize=1&pageHelp.endPage=1"
+    "&pageHelp.pageSize={page_size}"
+    "&pageHelp.pageNo={page_no}&pageHelp.beginPage={page_no}"
+    "&pageHelp.cacheSize=1&pageHelp.endPage={page_no}"
 )
 _SSE_HEADERS = {"Referer": "https://www.sse.com.cn/"}
 
@@ -139,33 +140,47 @@ def _finish(rows: list[dict]) -> pl.DataFrame:
 
 def fetch_sse_margin_trading(trade_date: date, *, config=None) -> pl.DataFrame:
     """Official SH 融资融券 detail. ``short_balance`` is null — SSE omits it."""
-    url = SSE_URL.format(day=trade_date.strftime("%Y%m%d"))
+    raw_rows: list = []
+    total: int | None = None
     try:
-        with source_request(config, _SOURCE):
-            resp = _client().get(
-                url, headers=_SSE_HEADERS, impersonate="chrome", timeout=_TIMEOUT_SECONDS
+        page_no = 1
+        while True:
+            url = SSE_URL.format(
+                day=trade_date.strftime("%Y%m%d"),
+                page_size=SSE_PAGE_SIZE,
+                page_no=page_no,
             )
-        resp.raise_for_status()
-        page = (resp.json() or {}).get("pageHelp") or {}
+            with source_request(config, _SOURCE):
+                resp = _client().get(
+                    url, headers=_SSE_HEADERS, impersonate="chrome", timeout=_TIMEOUT_SECONDS
+                )
+            resp.raise_for_status()
+            page = (resp.json() or {}).get("pageHelp") or {}
+            data = page.get("data") or []
+            if total is None:
+                reported_total = page.get("total")
+                total = int(reported_total) if reported_total is not None else len(data)
+            raw_rows.extend(data)
+            if len(raw_rows) >= total or page_no * SSE_PAGE_SIZE >= total:
+                break
+            if not data:
+                break
+            page_no += 1
     except Exception as exc:
         logger.warning("SSE margin detail unavailable for %s: %s", trade_date, exc)
         return _EMPTY_MARGIN.clone()
 
-    data = page.get("data") or []
-    total = page.get("total")
-    if isinstance(total, int) and total > len(data):
-        # One request is meant to cover the day. A short page means the server
-        # capped it, and writing it would look like securities left the list.
+    if total is not None and total > len(raw_rows):
         logger.warning(
             "SSE margin detail returned %d of %d rows for %s; not writing a partial day",
-            len(data),
+            len(raw_rows),
             total,
             trade_date,
         )
         return _EMPTY_MARGIN.clone()
 
     rows: list[dict] = []
-    for item in data:
+    for item in raw_rows:
         if not isinstance(item, dict):
             continue
         code = str(item.get("stockCode") or "").strip().zfill(6)
@@ -183,7 +198,7 @@ def fetch_sse_margin_trading(trade_date: date, *, config=None) -> pl.DataFrame:
                 "short_sell_volume": _number(item.get("rqmcl")),
             }
         )
-    if not rows and data:
+    if not rows and raw_rows:
         logger.warning("SSE margin detail returned no usable rows; format may have changed")
     return _finish(rows)
 

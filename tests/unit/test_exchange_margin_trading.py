@@ -39,6 +39,18 @@ def _serve(monkeypatch, resp):
     )
 
 
+def _serve_pages(monkeypatch, responses):
+    requested: list[str] = []
+    pages = iter(responses)
+
+    def get(url, *args, **kwargs):
+        requested.append(url)
+        return next(pages)
+
+    monkeypatch.setattr(em, "_client", lambda: type("C", (), {"get": staticmethod(get)}))
+    return requested
+
+
 def _sse_payload(rows, *, total=None):
     return {"pageHelp": {"data": rows, "total": len(rows) if total is None else total}}
 
@@ -74,6 +86,37 @@ def test_sse_fills_short_balance_if_the_publisher_ever_does(monkeypatch):
 def test_a_truncated_sse_page_is_not_written_as_a_day(monkeypatch):
     """A short page would read downstream as securities leaving the list."""
     _serve(monkeypatch, _Resp(_sse_payload([_SSE_ROW], total=1999)))
+    assert em.fetch_sse_margin_trading(TD).is_empty()
+
+
+def test_sse_fetches_every_page_when_the_server_caps_the_response(monkeypatch):
+    second_row = {**_SSE_ROW, "stockCode": "600001"}
+    requested = _serve_pages(
+        monkeypatch,
+        [
+            _Resp(_sse_payload([_SSE_ROW], total=2)),
+            _Resp(_sse_payload([second_row], total=2)),
+        ],
+    )
+    monkeypatch.setattr(em, "SSE_PAGE_SIZE", 1)
+
+    out = em.fetch_sse_margin_trading(TD)
+
+    assert out.get_column("symbol").to_list() == ["600000.SH", "600001.SH"]
+    assert "pageHelp.pageNo=1" in requested[0]
+    assert "pageHelp.pageNo=2" in requested[1]
+
+
+def test_sse_drops_the_day_when_a_later_page_is_missing(monkeypatch):
+    _serve_pages(
+        monkeypatch,
+        [
+            _Resp(_sse_payload([_SSE_ROW], total=2)),
+            _Resp(_sse_payload([], total=2)),
+        ],
+    )
+    monkeypatch.setattr(em, "SSE_PAGE_SIZE", 1)
+
     assert em.fetch_sse_margin_trading(TD).is_empty()
 
 
