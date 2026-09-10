@@ -542,6 +542,9 @@ def test_retry_failed_groups_retries_latest_failed_or_degraded_per_group(cfg_pat
                 {"run_id": "capital-old", "job_name": "daily:capital", "status": "failed"},
             ]
 
+        def get_retryable_batches(self, run_id):
+            return [{"batch_id": "retryable"}] if run_id == "research-new" else []
+
     class FakeEngine:
         def __init__(self, cfg):
             self.manifest = FakeManifest()
@@ -569,6 +572,10 @@ def test_retry_failed_groups_accepts_legacy_warning_status(cfg_path, monkeypatch
     class FakeManifest:
         def list_runs(self):
             return [{"run_id": "core-new", "job_name": "daily:core", "status": "warning"}]
+
+        def get_retryable_batches(self, run_id):
+            assert run_id == "core-new"
+            return [{"batch_id": "retryable"}]
 
     class FakeEngine:
         def __init__(self, cfg):
@@ -609,6 +616,54 @@ def test_retry_failed_groups_reports_child_failure(cfg_path, monkeypatch):
     result = CliRunner().invoke(cli, ["retry", "--config", cfg_path, "--failed-groups"])
 
     assert result.exit_code == 1
+
+
+def test_retry_failed_groups_accepts_resolved_degraded_child(cfg_path, monkeypatch):
+    class FakeManifest:
+        calls = 0
+
+        def list_runs(self):
+            return [{"run_id": "core-new", "job_name": "daily:core", "status": "degraded"}]
+
+        def get_retryable_batches(self, run_id):
+            assert run_id == "core-new"
+            self.calls += 1
+            return [{"batch_id": "retryable"}] if self.calls == 1 else []
+
+    class FakeEngine:
+        def __init__(self, cfg):
+            self.manifest = FakeManifest()
+
+    class Proc:
+        returncode = 2
+
+    monkeypatch.setattr("cnequity.cli.run_cmds.JobEngine", FakeEngine)
+    monkeypatch.setattr("cnequity.cli.run_cmds.subprocess.run", lambda *args, **kwargs: Proc())
+
+    result = CliRunner().invoke(cli, ["retry", "--config", cfg_path, "--failed-groups"])
+
+    assert result.exit_code == 0, result.output
+    assert "remains degraded, but has no retryable batches" in result.output
+
+
+def test_retry_failed_groups_skips_degraded_run_without_batches(cfg_path, monkeypatch):
+    class FakeManifest:
+        def list_runs(self):
+            return [{"run_id": "core-new", "job_name": "daily:core", "status": "degraded"}]
+
+        def get_retryable_batches(self, run_id):
+            assert run_id == "core-new"
+            return []
+
+    class FakeEngine:
+        def __init__(self, cfg):
+            self.manifest = FakeManifest()
+
+    monkeypatch.setattr("cnequity.cli.run_cmds.JobEngine", FakeEngine)
+    result = CliRunner().invoke(cli, ["retry", "--config", cfg_path, "--failed-groups"])
+
+    assert result.exit_code == 0, result.output
+    assert "No failed or degraded daily group run to retry" in result.output
 
 
 def test_retry_requires_exactly_one_scope(cfg_path):

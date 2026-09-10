@@ -494,7 +494,22 @@ def _failed_daily_group_runs(engine: JobEngine) -> list[dict]:
             # replayed once a newer run for that group has succeeded.
             latest.setdefault(job_name, run)
     retryable_statuses = {"failed", "degraded", "warning"}
-    return [latest[name] for name in sorted(latest) if latest[name]["status"] in retryable_statuses]
+    runs: list[dict] = []
+    for name in sorted(latest):
+        run = latest[name]
+        status = str(run["status"])
+        if status not in retryable_statuses:
+            continue
+        # A degraded receipt can deliberately preserve source-limitation
+        # evidence after every concrete batch has been resolved. There is no
+        # batch-level action left for this command in that case; retrying the
+        # run twice every night only reproduces the same degraded receipt.
+        if status in {"degraded", "warning"} and not engine.manifest.get_retryable_batches(
+            str(run["run_id"])
+        ):
+            continue
+        runs.append(run)
+    return runs
 
 
 @cli.command()
@@ -534,7 +549,11 @@ def retry(config_path: str, run_id: str | None, failed_groups: bool):
                 ],
                 check=False,
             )
-            if proc.returncode != 0:
+            if proc.returncode == 2 and not engine.manifest.get_retryable_batches(
+                str(run["run_id"])
+            ):
+                click.echo(f"Run {run['run_id']} remains degraded, but has no retryable batches.")
+            elif proc.returncode != 0:
                 failed = True
         if failed:
             raise SystemExit(1)
