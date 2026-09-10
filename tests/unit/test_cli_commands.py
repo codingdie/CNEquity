@@ -527,7 +527,7 @@ def test_retry_failed_job(cfg_path, monkeypatch):
     assert result.exit_code == 1
 
 
-def test_retry_failed_groups_retries_only_latest_failed_per_group(cfg_path, monkeypatch):
+def test_retry_failed_groups_retries_latest_failed_or_degraded_per_group(cfg_path, monkeypatch):
     class FakeManifest:
         def list_runs(self):
             return [
@@ -536,7 +536,7 @@ def test_retry_failed_groups_retries_only_latest_failed_per_group(cfg_path, monk
                 {
                     "run_id": "research-new",
                     "job_name": "daily:research",
-                    "status": "failed",
+                    "status": "degraded",
                 },
                 {"run_id": "capital-new", "job_name": "daily:capital", "status": "success"},
                 {"run_id": "capital-old", "job_name": "daily:capital", "status": "failed"},
@@ -559,10 +559,36 @@ def test_retry_failed_groups_retries_only_latest_failed_per_group(cfg_path, monk
     result = CliRunner().invoke(cli, ["retry", "--config", cfg_path, "--failed-groups"])
 
     assert result.exit_code == 0, result.output
-    assert result.output.count("Retrying failed daily group run") == 1
+    assert result.output.count("Retrying non-success daily group run") == 1
     assert "research-new" in result.output
     assert len(calls) == 1
     assert calls[0][-1] == "research-new"
+
+
+def test_retry_failed_groups_accepts_legacy_warning_status(cfg_path, monkeypatch):
+    class FakeManifest:
+        def list_runs(self):
+            return [{"run_id": "core-new", "job_name": "daily:core", "status": "warning"}]
+
+    class FakeEngine:
+        def __init__(self, cfg):
+            self.manifest = FakeManifest()
+
+    class Proc:
+        returncode = 0
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr("cnequity.cli.run_cmds.JobEngine", FakeEngine)
+    monkeypatch.setattr(
+        "cnequity.cli.run_cmds.subprocess.run",
+        lambda argv, **kwargs: calls.append(argv) or Proc(),
+    )
+
+    result = CliRunner().invoke(cli, ["retry", "--config", cfg_path, "--failed-groups"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0][-1] == "core-new"
 
 
 def test_retry_failed_groups_reports_child_failure(cfg_path, monkeypatch):

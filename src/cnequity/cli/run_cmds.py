@@ -484,7 +484,7 @@ def _retry_single_run(engine: JobEngine, run_id: str) -> dict:
 
 
 def _failed_daily_group_runs(engine: JobEngine) -> list[dict]:
-    """Return the latest failed run of each ``daily:*`` group."""
+    """Return the latest retryable non-success run of each ``daily:*`` group."""
     latest: dict[str, dict] = {}
     for row in engine.manifest.list_runs():
         run = dict(row)
@@ -493,7 +493,8 @@ def _failed_daily_group_runs(engine: JobEngine) -> list[dict]:
             # Manifest order is newest first; an older failure must not be
             # replayed once a newer run for that group has succeeded.
             latest.setdefault(job_name, run)
-    return [latest[name] for name in sorted(latest) if latest[name]["status"] == "failed"]
+    retryable_statuses = {"failed", "degraded", "warning"}
+    return [latest[name] for name in sorted(latest) if latest[name]["status"] in retryable_statuses]
 
 
 @cli.command()
@@ -502,10 +503,10 @@ def _failed_daily_group_runs(engine: JobEngine) -> list[dict]:
 @click.option(
     "--failed-groups",
     is_flag=True,
-    help="Retry the latest failed run of each daily group.",
+    help="Retry the latest failed or degraded run of each daily group.",
 )
 def retry(config_path: str, run_id: str | None, failed_groups: bool):
-    """Retry one run or every latest failed daily group."""
+    """Retry one run or every latest failed/degraded daily group."""
     cfg = _cfg(config_path)
     engine = JobEngine(cfg)
     if failed_groups:
@@ -513,11 +514,11 @@ def retry(config_path: str, run_id: str | None, failed_groups: bool):
             raise click.ClickException("use either --run-id or --failed-groups, not both")
         runs = _failed_daily_group_runs(engine)
         if not runs:
-            click.echo("No failed daily group run to retry.")
+            click.echo("No failed or degraded daily group run to retry.")
             return
         failed = False
         for run in runs:
-            click.echo(f"Retrying failed daily group run {run['run_id']} ({run['job_name']})")
+            click.echo(f"Retrying non-success daily group run {run['run_id']} ({run['job_name']})")
             # Heavy groups retain sizeable Polars/Python arenas. A fresh child
             # process per group releases that memory before the next retry.
             proc = subprocess.run(

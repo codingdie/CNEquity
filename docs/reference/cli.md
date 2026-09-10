@@ -362,7 +362,7 @@ cne verify --kind interior --repair         # 只补内部空洞
 | 选项 | 说明 |
 |------|------|
 | `--run-id <id>` | 重试指定 run |
-| `--failed-groups` | 逐个独立进程重试每个 `daily:*` 分组最新的失败 run；若该分组已有更新的成功 run，则跳过旧失败 |
+| `--failed-groups` | 逐个独立进程重试每个 `daily:*` 分组最新的失败或降级 run（兼容旧版 `warning` 状态）；若该分组已有更新的成功 run，则跳过旧失败 |
 
 两项必须且只能选择一项。
 

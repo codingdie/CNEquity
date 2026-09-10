@@ -253,7 +253,7 @@ cne status                    # 查看 FRESH / STALE / EMPTY
 cne serve                     # 打开 http://127.0.0.1:8787
 cne sources probe                   # 检查上游数据源健康度
 cne retry --run-id <run_id>   # 只重试失败批次
-cne retry --failed-groups     # 重试各 daily 分组最新的失败 run
+cne retry --failed-groups     # 重试各 daily 分组最新的失败或降级 run
 ```
 
 单个 step 失败时，系统会记录 failed batch，其他步骤继续落盘；重试不会把整条任务重新跑一遍。浏览器控制台可以查看覆盖、新鲜度、容量、跑批和质量结果。
