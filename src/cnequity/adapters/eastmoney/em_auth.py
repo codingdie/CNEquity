@@ -192,10 +192,16 @@ def is_transport_fail_fast(exc: BaseException) -> bool:
     """
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response is not None and exc.response.status_code >= 500
+    # A response that started but stalled is commonly transient on the
+    # datacenter endpoints.  Let the caller's request retry budget handle it.
+    if isinstance(exc, httpx.ReadTimeout):
+        return False
     return isinstance(
         exc,
         (
-            httpx.TimeoutException,
+            httpx.ConnectTimeout,
+            httpx.WriteTimeout,
+            httpx.PoolTimeout,
             httpx.ConnectError,
             httpx.ProxyError,
             httpx.RemoteProtocolError,

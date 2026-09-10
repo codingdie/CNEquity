@@ -165,10 +165,8 @@ def test_a_shard_that_is_all_one_key_raises_rather_than_looping():
         _fetch(client, keyset_column="SECUCODE")
 
 
-def test_equality_recovery_keeps_the_keyset_column():
-    """The recursive fetch used to drop keyset_column, so a boundary-key shard
-    that itself crossed the page cap failed with 'pass keyset_column' instead
-    of continuing (observed on RPT_F10_EH_FREEHOLDERS, 2026-09-06)."""
+def test_equality_recovery_is_not_recursively_reanchored():
+    """An equality slice is one key and cannot be meaningfully re-anchored."""
 
     class _SawEquality(Exception):
         pass
@@ -179,10 +177,9 @@ def test_equality_recovery_keeps_the_keyset_column():
     captured = {}
 
     def spy_fetch(client, report, columns, **kwargs):
-        if kwargs.get("keyset_column") == "SECUCODE" and "SECUCODE='" in kwargs.get(
-            "filter_expr", ""
-        ):
+        if "SECUCODE='" in kwargs.get("filter_expr", ""):
             captured["keyset"] = kwargs.get("keyset_column")
+            captured["expected"] = kwargs.get("_expected_keyset")
             raise _SawEquality()
         return original_fetch(client, report, columns, **kwargs)
 
@@ -193,7 +190,39 @@ def test_equality_recovery_keeps_the_keyset_column():
             _fetch(FakeDatacenter(_table(symbols=250)), keyset_column="SECUCODE")
     finally:
         monkeypatch.undo()
-    assert captured.get("keyset") == "SECUCODE", "equality recovery lost keyset_column"
+    assert captured.get("keyset") is None
+    assert captured.get("expected") == ("SECUCODE", "S069")
+
+
+def test_ignored_equality_filter_fails_on_first_boundary_page():
+    """A real EastMoney report accepts the compound expression but ignores the
+    SECUCODE equality. Detect that on its first response instead of recursively
+    retaining another 100 pages until timeout or OOM."""
+
+    class IgnoresEquality(FakeDatacenter):
+        def get(self, url: str, **kwargs):
+            raw_filter = re.search(r"filter=([^&]*)", url)
+            filter_expr = unquote(raw_filter.group(1)) if raw_filter else ""
+            if "SECUCODE='" not in filter_expr:
+                return super().get(url, **kwargs)
+            self.urls.append(url)
+            self.filters.append(filter_expr)
+            size = int(re.search(r"pageSize=(\d+)", url).group(1))
+            return _Resp(
+                {
+                    "success": True,
+                    "result": {
+                        "data": self.rows[:size],
+                        "count": len(self.rows),
+                        "pages": (len(self.rows) + size - 1) // size,
+                    },
+                }
+            )
+
+    client = IgnoresEquality(_table())
+    with pytest.raises(EastMoneyDatacenterError, match="ignored equality filter"):
+        _fetch(client, keyset_column="SECUCODE")
+    assert len(client.urls) == _MAX_PAGE_NUMBER + 1
 
 
 def test_a_shard_entirely_one_key_fails_loudly_instead_of_recurring():

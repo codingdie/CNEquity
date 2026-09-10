@@ -212,6 +212,23 @@ def test_both_scopes_land_in_one_frame_with_their_own_pct_field(monkeypatch):
     assert float_row["is_institution"] is True
 
 
+def test_holder_reports_use_large_pages_without_unsupported_keyset(monkeypatch):
+    seen: dict[str, dict] = {}
+
+    def _fake(client, report, columns, **kwargs):
+        seen[report] = kwargs
+        return []
+
+    monkeypatch.setattr(sh, "fetch_datacenter", _fake)
+    sh.fetch_top_holders(WIN_START, WIN_END, client=_Client())
+
+    assert set(seen) == {sh._FREEHOLDERS_REPORT, sh._HOLDERS_REPORT}
+    for kwargs in seen.values():
+        assert kwargs["page_size"] == 2500
+        assert kwargs["trust_page_size"] is True
+        assert kwargs["keyset_column"] is None
+
+
 def test_total_scope_borrows_its_disclosure_date_from_the_float_report(monkeypatch):
     """RPT_F10_EH_HOLDERS carries no NOTICE_DATE; without the borrow it could not
     be served point-in-time at all."""

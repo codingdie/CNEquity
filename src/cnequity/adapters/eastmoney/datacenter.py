@@ -188,6 +188,7 @@ def fetch_datacenter(
     archive_run_id: str | None = None,
     archive_source: str = "eastmoney",
     archive_request_scope: str | None = None,
+    _expected_keyset: tuple[str, str] | None = None,
 ) -> list[dict]:
     """Page a datacenter report to exhaustion, or until *stop_after* says stop.
 
@@ -258,8 +259,10 @@ def fetch_datacenter(
         url = f"{DATACENTER_BASE}?{params}"
 
         last_exc: Exception | None = None
+        attempts_made = 0
         payload = None
         for attempt in range(max_retries):
+            attempts_made = attempt + 1
             try:
                 resp = client.get(url)
                 resp.raise_for_status()
@@ -321,17 +324,17 @@ def fetch_datacenter(
         if last_exc is not None:
             if isinstance(last_exc, _ServerBusy):
                 raise EastMoneyDatacenterError(
-                    f"EastMoney datacenter {report} still busy after {max_retries} attempts "
+                    f"EastMoney datacenter {report} still busy after {attempts_made} attempts "
                     f"({last_exc}); this is throttling, not a schema break — retry later or "
                     "raise [sources.eastmoney].min_interval_seconds"
                 ) from last_exc
             if isinstance(last_exc, _TransientEmptyPage):
                 raise EastMoneyDatacenterError(
                     f"EastMoney datacenter {report} truncated: {last_exc} persisted after "
-                    f"{max_retries} attempts; got {len(rows)} of {expected_count} rows"
+                    f"{attempts_made} attempts; got {len(rows)} of {expected_count} rows"
                 ) from last_exc
             raise EastMoneyDatacenterError(
-                f"EastMoney datacenter {report} page {page} failed after {max_retries} attempts: "
+                f"EastMoney datacenter {report} page {page} failed after {attempts_made} attempts: "
                 f"{last_exc}"
             ) from last_exc
 
@@ -370,6 +373,21 @@ def fetch_datacenter(
             raise EastMoneyDatacenterError(
                 f"EastMoney datacenter {report} returned a non-list result.data"
             )
+        if _expected_keyset is not None and batch:
+            expected_column, expected_value = _expected_keyset
+            unexpected = next(
+                (
+                    str(item.get(expected_column) or "")
+                    for item in batch
+                    if str(item.get(expected_column) or "") != expected_value
+                ),
+                None,
+            )
+            if unexpected is not None:
+                raise EastMoneyDatacenterError(
+                    f"EastMoney datacenter {report} ignored equality filter for "
+                    f"{expected_column}={expected_value!r}; got {unexpected!r}"
+                )
         if keyset_column is not None and batch:
             key_values = [str(item.get(keyset_column) or "") for item in batch]
             if any(not value for value in key_values):
@@ -490,7 +508,11 @@ def fetch_datacenter(
                     page_size=page_size,
                     sort_columns=sort_columns,
                     sort_types=sort_types,
-                    keyset_column=keyset_column,
+                    # An equality slice contains one key. It cannot be
+                    # re-anchored, and recursively trying to do so can retain
+                    # 100 pages per stack frame when the source ignores the
+                    # equality predicate.
+                    keyset_column=None,
                     max_retries=max_retries,
                     retry_backoff_seconds=retry_backoff_seconds,
                     trust_page_size=trust_page_size,
@@ -500,6 +522,7 @@ def fetch_datacenter(
                     archive_run_id=archive_run_id,
                     archive_source=archive_source,
                     archive_request_scope=archive_request_scope,
+                    _expected_keyset=(keyset_column, next_bound),
                 )
                 if any(str(item.get(keyset_column) or "") != next_bound for item in boundary_rows):
                     raise EastMoneyDatacenterError(

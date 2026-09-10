@@ -14,7 +14,8 @@ from cnequity.adapters.eastmoney.em_auth import is_transport_fail_fast
 
 
 def test_is_transport_fail_fast():
-    assert is_transport_fail_fast(httpx.TimeoutException("t"))
+    assert not is_transport_fail_fast(httpx.ReadTimeout("read"))
+    assert is_transport_fail_fast(httpx.ConnectTimeout("connect"))
     assert is_transport_fail_fast(httpx.ConnectError("c"))
     assert is_transport_fail_fast(httpx.RemoteProtocolError("r"))
     # A dead proxy is the overseas equivalent of a dead route: with
@@ -23,13 +24,13 @@ def test_is_transport_fail_fast():
     assert not is_transport_fail_fast(RuntimeError("other"))
 
 
-def test_datacenter_does_not_retry_timeout():
+def test_datacenter_retries_read_timeout():
     calls = {"n": 0}
 
     class FakeClient:
         def get(self, url):
             calls["n"] += 1
-            raise httpx.TimeoutException("slow")
+            raise httpx.ReadTimeout("slow")
 
     with pytest.raises(EastMoneyDatacenterError, match="failed after"):
         fetch_datacenter(
@@ -39,7 +40,22 @@ def test_datacenter_does_not_retry_timeout():
             max_retries=3,
             retry_backoff_seconds=0,
         )
-    assert calls["n"] == 1
+    assert calls["n"] == 3
+
+
+def test_datacenter_reports_actual_attempts_for_fail_fast_error():
+    class FakeClient:
+        def get(self, url):
+            raise httpx.ConnectTimeout("down")
+
+    with pytest.raises(EastMoneyDatacenterError, match="after 1 attempts"):
+        fetch_datacenter(
+            FakeClient(),
+            "RPT_TEST",
+            "SECUCODE",
+            max_retries=3,
+            retry_backoff_seconds=0,
+        )
 
 
 def test_clist_does_not_retry_connect_error():

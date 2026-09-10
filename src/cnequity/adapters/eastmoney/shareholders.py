@@ -81,6 +81,13 @@ _KEYSET_COLUMN = "SECUCODE"
 _SWEEP_RETRIES = 5
 _SWEEP_BACKOFF_SECONDS = 15.0
 
+# Both holder reports honor 2,500 rows per page (verified against the live
+# endpoint). Their 240-day daily window is currently 48/56 pages at this size,
+# safely below EastMoney's hard pageNumber=100 ceiling. SECUCODE is sortable
+# but not filterable on these reports, so keyset pagination cannot be used.
+_HOLDER_PAGE_SIZE = 2500
+_HOLDER_REPORTS = frozenset({_FREEHOLDERS_REPORT, _HOLDERS_REPORT})
+
 
 def _num(value: object) -> float | None:
     if value is None or value == "":
@@ -162,6 +169,7 @@ def _fetch_filtered(
     config: Config | None,
 ) -> list[dict]:
     rate_limit_if_unconfigured(client, config)
+    holder_report = report in _HOLDER_REPORTS
     return fetch_datacenter(
         client,
         report,
@@ -170,7 +178,9 @@ def _fetch_filtered(
         # Ascending by the keyset column is a precondition of re-anchoring.
         sort_columns=_KEYSET_COLUMN,
         sort_types="1",
-        keyset_column=_KEYSET_COLUMN,
+        page_size=_HOLDER_PAGE_SIZE if holder_report else 500,
+        trust_page_size=holder_report,
+        keyset_column=None if holder_report else _KEYSET_COLUMN,
         max_retries=_SWEEP_RETRIES,
         retry_backoff_seconds=_SWEEP_BACKOFF_SECONDS,
     )
