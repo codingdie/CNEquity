@@ -439,6 +439,34 @@ def test_worker_batch_specs_reads_manifest_window(tmp_path):
     ]
 
 
+def test_retry_context_pins_finalize_to_original_trade_date(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    init_data_layout(cfg)
+    engine = JobEngine(cfg)
+    trade_date = date(2024, 6, 28)
+    run_id = engine.manifest.start_run("daily:core", {"trade_date": trade_date.isoformat()})
+
+    context = engine._merge_retry_context(run_id, trade_date)
+
+    assert context["derive_end"] == trade_date
+
+
+def test_retry_context_preserves_explicit_derive_end(tmp_path):
+    cfg = Config(data_root=tmp_path / "data")
+    init_data_layout(cfg)
+    engine = JobEngine(cfg)
+    trade_date = date(2024, 6, 28)
+    derive_end = date(2024, 6, 27)
+    run_id = engine.manifest.start_run(
+        "derive:industry_index",
+        {"trade_date": trade_date.isoformat(), "derive_end": derive_end.isoformat()},
+    )
+
+    context = engine._merge_retry_context(run_id, trade_date)
+
+    assert context["derive_end"] == derive_end
+
+
 def test_run_lock_blocks_concurrent_retry(tmp_path):
     cfg = Config(data_root=tmp_path / "data")
     init_data_layout(cfg)

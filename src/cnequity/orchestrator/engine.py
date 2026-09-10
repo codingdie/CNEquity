@@ -832,6 +832,16 @@ class JobEngine:
         for key, value in self.manifest.get_run_metadata(run_id).items():
             if key not in context:
                 context[key] = value
+        for key in ("derive_start", "derive_end"):
+            if isinstance(context.get(key), str):
+                context[key] = date.fromisoformat(context[key])
+        # Finalizers normally derive through Shanghai "today" when no bound is
+        # supplied. A retry may run days after its original session, so leaving
+        # this unset asks for unpublished future bars and turns an otherwise
+        # repaired run back into a retryable warning. Preserve an explicit
+        # derive bound, otherwise pin finalization to the run's stored date.
+        if context.get("derive_end") is None:
+            context["derive_end"] = trade_date
         return context
 
     def _retry_batch_status(self, run_id: str) -> str:
