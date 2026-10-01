@@ -8,6 +8,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- 修复 Baostock 历史状态回填丢弃停牌日的问题：保留真实 `tradestatus=0` 证据及独立 ST 标记，解除历史日线缺口门禁误报。
+
 - 修正 `trading_status` 中 `eastmoney_cached` 的证据优先级：缓存回退始终低于
   由日线重建的停牌记录，避免旧交易状态覆盖停牌证据并阻塞日线完整性检查。
   Python、Polars 和 DuckDB 读取保持一致；已发布的错误状态需重新派生并提交。

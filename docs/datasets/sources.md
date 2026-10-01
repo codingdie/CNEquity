@@ -42,7 +42,7 @@
 | 备源 | eastmoney |
 | 频率 | 每日 |
 | 主键 | (symbol, trade_date) |
-| 历史 ST 回补 | Baostock 覆盖 SH/SZ；可选 Tushare Pro `bak_basic`（2016）+ `stock_st`（2017-01-01 起）覆盖 BJ，需 token；缺少源端覆盖时审计保持 warning |
+| 历史 ST 回补 | Baostock 覆盖 SH/SZ，保留 `tradestatus=0` 的真实停牌行及独立 `isST` 标记；可选 Tushare Pro `bak_basic`（2016）+ `stock_st`（2017-01-01 起）覆盖 BJ，需 token；缺少源端覆盖时审计保持 warning |
 | 列语义 | `status` 只表示交易状态（`normal`/`suspended`/`delisted`），ST/*ST 在独立列 `risk_warning`。两者正交：一只 ST 股停牌时两个字段同时成立 |
 | 退市标的 | 不向行情板询问（板答不了），由 `instruments.delist_date` 判定，写 `status=delisted`、`is_trading=false`、`source=derived_delisted`，`risk_warning` 取自最终简称 |
 | 已知限制 | ST 与 *ST 不做区分（喂本数据集的源都没有这个区分：Baostock 只有 `isST` 布尔，Tushare adapter 早已把 `ST`/`*ST` 归一）。更细的标识在交易所简称，经 `instruments.name` 获取 |

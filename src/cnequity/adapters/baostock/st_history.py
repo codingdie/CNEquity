@@ -5,13 +5,9 @@ only expose *today's* ST list — so ST labels in the lake start at the first li
 run (2026-07), leaving every earlier backtest window with survivorship /
 look-ahead bias (``universe="all_a"`` does not drop names that were ST then).
 
-Baostock's k-data carries a per-day ``isST`` flag back to 2016, so a per-symbol
-sweep reconstructs the historical ST label. ``isST`` is binary — it does not
-split "ST" from "*ST" — so every ST day maps to ``status="st"``; that is enough
-for the universe filter (``EXCLUDED_STATUSES`` covers both). Every traded day
-is emitted, including ``status="normal"`` as explicit negative evidence. A
-missing row therefore remains unknown rather than being silently interpreted
-as non-ST. Suspension is reconstructed separately from bar gaps.
+Baostock 的每日 ``tradestatus`` 与 ``isST`` 分别提供历史交易状态和风险警示。
+保留交易日与停牌日，状态映射到 normal/suspended，风险警示独立写入
+``risk_warning``，不区分 ST 与 *ST。缺行仍表示未知，不推断正常或停牌。
 """
 
 from __future__ import annotations
@@ -26,7 +22,7 @@ from cnequity.adapters.baostock._session import (
     to_baostock_symbol,
 )
 from cnequity.domain.rate_limit import source_request
-from cnequity.domain.trading_status import STATUS_NORMAL
+from cnequity.domain.trading_status import STATUS_NORMAL, STATUS_SUSPENDED
 
 __all__ = ["fetch_st_history", "to_baostock_symbol"]
 
@@ -44,7 +40,7 @@ _OUTPUT_SCHEMA = {
 
 
 def _fetch_one_st(bs, symbol: str, start: date, end: date, *, config=None) -> list[dict] | None:
-    """Trading-day ST/normal evidence, or ``None`` on a retryable error.
+    """Historical trading status and ST evidence, or ``None`` on a retryable error.
 
     Unexpected ``isST`` vocabulary fails the entire symbol closed. Treating an
     unknown value as ``normal`` would manufacture negative evidence.
@@ -73,8 +69,6 @@ def _fetch_one_st(bs, symbol: str, start: date, end: date, *, config=None) -> li
             continue
         if tradestatus not in ("0", "1"):
             return None
-        if tradestatus != "1":
-            continue
         if is_st not in ("0", "1"):
             return None
         try:
@@ -87,8 +81,8 @@ def _fetch_one_st(bs, symbol: str, start: date, end: date, *, config=None) -> li
             {
                 "symbol": symbol,
                 "trade_date": trade_date,
-                "is_trading": True,
-                "status": STATUS_NORMAL,
+                "is_trading": tradestatus == "1",
+                "status": STATUS_NORMAL if tradestatus == "1" else STATUS_SUSPENDED,
                 "risk_warning": is_st == "1",
             }
         )
@@ -107,13 +101,13 @@ def fetch_st_history(
     config=None,
     rest_after_batch: bool = False,
 ) -> tuple[pl.DataFrame, list[str]]:
-    """Per-symbol historical ST/normal evidence over ``[start, end]``.
+    """Per-symbol historical trading status and ST evidence over ``[start, end]``.
 
     Returns ``(dataframe, failed_symbols)``. Fail-loud on login failure; each
     symbol is retried with a fresh session + backoff and the still-failing ones
     are returned so the caller can surface them and resume. A traded symbol
     that was never ST contributes explicit ``normal`` rows; a symbol with no
-    trading sessions in the requested window contributes zero rows.
+    source records in the requested window contributes zero rows.
 
     ``bs`` / ``sleep`` / ``config`` are injectable for offline tests. Pass
     ``config`` in production for ``[sources.baostock]`` pacing.

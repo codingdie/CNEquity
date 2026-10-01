@@ -59,7 +59,7 @@ def test_emits_traded_st_and_normal_evidence():
                 [
                     ("2020-04-28", "1", "0"),  # not ST yet
                     ("2020-04-29", "1", "1"),  # ST day -> emitted
-                    ("2020-04-30", "0", "1"),  # ST but suspended -> skipped
+                    ("2020-04-30", "0", "1"),  # ST 停牌仍保留风险警示
                     ("2020-05-06", "1", "1"),  # ST day -> emitted
                 ],
             )
@@ -71,10 +71,10 @@ def test_emits_traded_st_and_normal_evidence():
 
     assert bs.logged_out is True
     assert failed == []
-    assert df.height == 3
-    assert df.sort("trade_date")["status"].to_list() == ["normal", "normal", "normal"]
-    assert df.sort("trade_date")["risk_warning"].to_list() == [False, True, True]
-    assert df["is_trading"].unique().to_list() == [True]
+    assert df.height == 4
+    assert df.sort("trade_date")["status"].to_list() == ["normal", "normal", "suspended", "normal"]
+    assert df.sort("trade_date")["risk_warning"].to_list() == [False, True, True, True]
+    assert df["is_trading"].to_list() == [True, True, False, True]
     # columns are the curated trading_status contract minus provenance
     assert set(df.columns) == set(TRADING_STATUS_SCHEMA) - {"source", "data_version", "fetched_at"}
     # rows are unique on the trading_status primary key
@@ -132,8 +132,9 @@ def test_st_history_rejects_mixed_source_identities():
     assert failed == ["000001.SZ"]
 
 
-def test_unknown_is_st_value_fails_symbol_closed():
-    bs = _FakeBaostock({"sz.000001": _rows("sz.000001", [("2020-01-02", "1", "")])})
+@pytest.mark.parametrize("trade_status", ["0", "1"])
+def test_unknown_is_st_value_fails_symbol_closed(trade_status):
+    bs = _FakeBaostock({"sz.000001": _rows("sz.000001", [("2020-01-02", trade_status, "")])})
     df, failed = fetch_st_history(
         ["000001.SZ"], date(2020, 1, 1), date(2020, 12, 31), bs=bs, sleep=lambda _: None
     )
@@ -247,3 +248,17 @@ def test_stalled_socket_is_retried_then_reported_failed():
     assert df.height == 1
     assert failed == ["600145.SH"]
     assert bs.logins > 1  # relogin attempted after the stall
+
+
+def test_suspended_non_st_symbol_preserves_source_evidence():
+    bs = _FakeBaostock(
+        {"sh.600293": _rows("sh.600293", [("2026-09-29", "0", "0"), ("2026-09-30", "0", "0")])}
+    )
+    df, failed = fetch_st_history(
+        ["600293.SH"], date(2026, 9, 29), date(2026, 9, 30), bs=bs, sleep=lambda _: None
+    )
+    assert failed == []
+    assert df["trade_date"].to_list() == [date(2026, 9, 29), date(2026, 9, 30)]
+    assert df["status"].to_list() == ["suspended", "suspended"]
+    assert df["is_trading"].to_list() == [False, False]
+    assert df["risk_warning"].to_list() == [False, False]
