@@ -233,8 +233,8 @@ def fetch_daily_bars_sina(
 
     ``require_confirmed_empty`` is for a caller that may relax a coverage gate
     only after a trustworthy no-row response. A non-empty payload with malformed
-    rows must not become that proof merely because normalization filters every
-    row in the requested date range.
+    rows inside the requested window (or with unknown dates) must not become
+    that proof merely because normalization filters them out.
     """
     if config is None:
         rows = _request(symbol, datalen, client)
@@ -249,6 +249,9 @@ def fetch_daily_bars_sina(
     for item in rows:
         try:
             trade_date = date.fromisoformat(str(item["day"])[:10])
+            # 全历史响应中的窗口外坏行不影响目标窗口；未知日期仍严格报错。
+            if (start is not None and trade_date < start) or (end is not None and trade_date > end):
+                continue
             open_ = float(item["open"])
             high = float(item["high"])
             low = float(item["low"])

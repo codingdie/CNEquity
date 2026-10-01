@@ -262,3 +262,26 @@ def test_request_uses_client(monkeypatch):
     out = sina._request("600519.SH", 1, client)
     assert out is not None
     assert seen["params"]["symbol"] == "sh600519"
+
+
+@pytest.mark.parametrize(
+    "day,raises",
+    [
+        ("2011-11-29", False),
+        ("2026-10-01", False),
+        ("2026-09-29", True),
+        ("2026-09-30", True),
+        ("unknown", True),
+        (None, True),
+    ],
+)
+def test_confirmed_empty_checks_malformed_rows_in_requested_window(monkeypatch, day, raises):
+    # 新浪返回全历史：日期明确在窗口外的坏行不应否定目标窗口的空响应。
+    row = {"day": day, "open": "0", "high": "0", "low": "0", "close": "0", "volume": "0"}
+    monkeypatch.setattr(sina, "_request", lambda *args: [row])
+    kwargs = dict(start=date(2026, 9, 29), end=date(2026, 9, 30), require_confirmed_empty=True)
+    if raises:
+        with pytest.raises(sina.SinaBarsError, match="cannot certify an empty result"):
+            sina.fetch_daily_bars_sina("165311.SZ", **kwargs)
+    else:
+        assert sina.fetch_daily_bars_sina("165311.SZ", **kwargs).is_empty()
