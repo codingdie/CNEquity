@@ -81,6 +81,9 @@ def _frame(rows: list[dict]) -> pl.DataFrame:
         ),
         (_status_row("eastmoney", RESTATED), EVIDENCE_RESTATED),
         (_status_row("tdx_protocol", RESTATED), EVIDENCE_RESTATED),
+        (_status_row("eastmoney_cached", SAME_SESSION), EVIDENCE_RESTATED),
+        (_status_row("eastmoney_cached", RESTATED), EVIDENCE_RESTATED),
+        (_status_row("eastmoney_cached", None), EVIDENCE_RESTATED),
         (_status_row(DERIVED_BAR_GAP_SOURCE, RESTATED), EVIDENCE_DERIVED),
         (_status_row("derived_delisted", None), EVIDENCE_POINT_IN_TIME),
         # An unclassified source wins conservatively rather than being
@@ -101,6 +104,9 @@ def test_the_three_implementations_agree():
         _status_row(DERIVED_BAR_GAP_SOURCE, RESTATED),
         _status_row("derived_delisted", None),
         _status_row("tdx_protocol", None),
+        _status_row("eastmoney_cached", SAME_SESSION),
+        _status_row("eastmoney_cached", RESTATED),
+        _status_row("eastmoney_cached", None),
     ]
     frame = _frame(rows)
     row_wise = [evidence_rank(row) for row in rows]
@@ -160,7 +166,8 @@ def test_an_authority_still_corrects_a_derived_halt():
         assert canonical["status"][0] == "normal"
 
 
-def test_derived_rows_survive_the_next_compact(tmp_path):
+@pytest.mark.parametrize("source", ["eastmoney", "eastmoney_cached"])
+def test_derived_rows_survive_the_next_compact(tmp_path, source):
     """The regression: a second compact used to rebuild the day without them."""
     staging, curated = tmp_path / "staging", tmp_path / "curated"
     writer = StagingWriter(staging)
@@ -184,7 +191,7 @@ def test_derived_rows_survive_the_next_compact(tmp_path):
 
     # The next day's ordinary EastMoney sweep restates the same session.
     writer.write_batch(
-        "trading_status", "run-2", "batch-0", _frame([_status_row("eastmoney", RESTATED)])
+        "trading_status", "run-2", "batch-0", _frame([_status_row(source, RESTATED)])
     )
     compact_dataset(staging, curated, "trading_status", "run-2")
 

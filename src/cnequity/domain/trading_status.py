@@ -185,6 +185,9 @@ def _shanghai(value: object) -> datetime | None:
 def evidence_rank(row: Mapping[str, object]) -> int:
     """Evidence class of one status row. Higher wins a primary-key collision."""
     source = str(row.get("source") or "")
+    # 缓存回退的 fetched_at 是重用时间，不能证明当日实际交易状态。
+    if source == "eastmoney_cached":
+        return EVIDENCE_RESTATED
     if source in CURRENT_SNAPSHOT_SOURCES:
         fetched = _shanghai(row.get("fetched_at"))
         trade_date = row.get("trade_date")
@@ -237,7 +240,9 @@ def evidence_rank_expr(schema: Iterable[str] | Mapping[str, pl.DataType]) -> pl.
     )
     snapshot = pl.col("source").is_in(list(CURRENT_SNAPSHOT_SOURCES))
     return (
-        pl.when(snapshot & same_session)
+        pl.when(pl.col("source") == "eastmoney_cached")
+        .then(EVIDENCE_RESTATED)
+        .when(snapshot & same_session)
         .then(EVIDENCE_POINT_IN_TIME)
         .when(snapshot)
         .then(EVIDENCE_RESTATED)
@@ -274,6 +279,7 @@ def evidence_rank_sql(columns: Iterable[str] | Mapping[str, str]) -> str | None:
     final_at = SESSION_FINAL_AT.strftime("%H:%M:%S")
     return (
         "CASE "
+        f"WHEN source = 'eastmoney_cached' THEN {EVIDENCE_RESTATED} "
         f"WHEN source IN ({boards}) THEN "
         f"CASE WHEN fetched_at IS NOT NULL AND CAST({local} AS DATE) = trade_date "
         f"AND CAST({local} AS TIME) >= TIME '{final_at}' "

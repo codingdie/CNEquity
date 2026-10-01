@@ -8,6 +8,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- 修正 `trading_status` 中 `eastmoney_cached` 的证据优先级：缓存回退始终低于
+  由日线重建的停牌记录，避免旧交易状态覆盖停牌证据并阻塞日线完整性检查。
+  Python、Polars 和 DuckDB 读取保持一致；已发布的错误状态需重新派生并提交。
+
 - `economic_calendar` 恢复东方财富经济事件日程采集：从已失效的
   `RPT_ECONOMICCALENDAR` 更新为网页现行 `RPT_CPH_FECALENDAR`，按日期窗口完整分页。
   现行源只提供日程，前值、预期值、公布值、重要性和单位保留为 null；不混用来源、

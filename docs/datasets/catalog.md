@@ -57,6 +57,8 @@ cnequity 交付 **42 个注册数据集**（39 curated + 3 derived：`adj_factor
 | `snapshot_with_backfill` | 日更是快照，但有专用历史源 | `valuation_metrics`→baostock；`index_constituents`→cni；`industry_members`→sw；`sector_bars`→ths |
 | `snapshot_only` | **永远没有诚实历史序列**（只有 tip） | `analyst_consensus`、`fund_flow`、`sector_members`、`hot_rank`、`sector_fund_flow`、`news_headlines`、`flash_news_wire`、`economic_calendar` |
 
+`eastmoney_cached` 表示复用旧快照，抓取时间是重用时间，不能作为当日真实观测。合并时其优先级低于 `derived_bar_gap`；真实的当日收盘观测仍可纠正派生停牌。
+
 `trading_status` 的停牌覆盖可从 `daily_bars` 起点派生；ST 覆盖必须以完整的 `historical_st_evidence` 收据为准。没有覆盖请求窗口的收据时，**不要**假定 2001 起 `universe="all_a"` 已剔除历史 ST。BJ 可选用 Tushare Pro：2016 年通过 `bak_basic` 的历史简称、2017-01-01 起通过 `stock_st`；2016 年以前仍需独立的更深历史源。
 
 ### `trade_ticks` 是什么，不是什么
