@@ -300,6 +300,10 @@ bars_15m = (
 | daily_bars | tdx_protocol | eastmoney |
 | corporate_actions | eastmoney | tdx_protocol |
 
+## 日线补齐复用
+
+日线补齐可从覆盖请求窗口的成功 staging 批次复用记录，保留原始来源与抓取时间；仅对目标窗口交易日齐全的证券跳过重抓，仍经过校验与 compact 发布门禁。
+
 ## 对发布方的核对（authority checks）
 
 主备比对的是两个转发方：它们一致只能说明两者不冲突，不能说明谁对。以下检查越过转发方，直接对上游发布机构，

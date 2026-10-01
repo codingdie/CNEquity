@@ -868,8 +868,9 @@ class Manifest:
         window_end: str,
         *,
         exclude_run_id: str | None = None,
+        covering_window: bool = False,
     ) -> list[sqlite3.Row]:
-        """Find successful batches for an identical date window.
+        """Find successful batches for an identical or fully covering date window.
 
         Daily catchup is resumable across runs: a prior run may have compact
         verified batches before a later batch failed. Those batches are safe to
@@ -878,8 +879,11 @@ class Manifest:
         query = """
             SELECT * FROM ingestion_batches
             WHERE dataset = ? AND status = 'success'
-              AND window_start = ? AND window_end = ?
         """
+        if covering_window:
+            query += " AND window_start <= ? AND window_end >= ?"
+        else:
+            query += " AND window_start = ? AND window_end = ?"
         params: list[object] = [dataset, window_start, window_end]
         if exclude_run_id is not None:
             query += " AND run_id != ?"

@@ -8,6 +8,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- 单日补齐可复用覆盖目标窗口的成功日线批次，裁剪窗口并逐证券验证完整性，避免重抓全市场；失败或缺日批次仍不复用。
+
 - 修复 Baostock 历史状态回填丢弃停牌日的问题：保留真实 `tradestatus=0` 证据及独立 ST 标记，解除历史日线缺口门禁误报。
 
 - 修正 `trading_status` 中 `eastmoney_cached` 的证据优先级：缓存回退始终低于

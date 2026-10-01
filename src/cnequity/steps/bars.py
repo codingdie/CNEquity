@@ -324,7 +324,7 @@ def _reuse_successful_daily_bars(
 
     A failed catchup should not make the next run re-fetch every symbol whose
     earlier batch already finished successfully. Only manifest-successful
-    batches with the exact same window are eligible; failed/running staging is
+    batches covering the requested window are eligible; failed/running staging is
     never reused. A symbol is removed from the new fetch scope only when all
     trading sessions in the window are present.
     """
@@ -341,6 +341,7 @@ def _reuse_successful_daily_bars(
         start.isoformat(),
         end.isoformat(),
         exclude_run_id=run_id,
+        covering_window=True,
     )
     if not batches:
         return set()
